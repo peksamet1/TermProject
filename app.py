@@ -2,7 +2,7 @@
 
 Usage: solara run app.py
 Page 0: community energy balance and macro-grid dependency.
-Page 1: battery SoC and market order counts.
+Page 1: SoC, order counts, local P2P trade volume/price.
 Page 2: per-household generation/consumption and buy/sell orders (stacked).
 """
 
@@ -54,12 +54,7 @@ model_params = {
 
 
 def _agent_history(model: MicrogridModel):
-    """Return agent history as MultiIndex (Step, AgentID), or None if none yet.
-
-    Mesa's empty DataCollector returns a quirky non-empty DataFrame whose index
-    is literally ``Index(['Step', 'AgentID'])`` — not a MultiIndex — so ``.empty``
-    is the wrong guard.
-    """
+    """Return agent history as MultiIndex (Step, AgentID), or None if none yet."""
     agent_df = model.datacollector.get_agent_vars_dataframe()
     if not isinstance(agent_df.index, pd.MultiIndex):
         return None
@@ -79,7 +74,6 @@ def AgentHouseholdPlots(model: MicrogridModel):
         )
         return
 
-    # Prefer named level; fall back to position 1 if Mesa renames the index.
     level = "AgentID" if "AgentID" in (agent_df.index.names or []) else 1
     agent_ids = sorted(agent_df.index.get_level_values(level).unique())
     with solara.Column(gap="20px"):
@@ -111,10 +105,12 @@ def AgentHouseholdPlots(model: MicrogridModel):
             solara.FigureMatplotlib(fig)
 
 
-energy_plot = make_plot_component(["TotalGeneration", "TotalConsumption"])
+energy_plot = make_plot_component(["TotalGeneration", "TotalConsumption", "LocalTradedKwh"])
 grid_plot = make_plot_component(["GridImport", "GridExport"])
 soc_plot = make_plot_component("AvgProsumerSoC", page=1)
 orders_plot = make_plot_component(["BuyOrders", "SellOrders"], page=1)
+trade_plot = make_plot_component(["LocalTradedKwh", "LocalTradeCount"], page=1)
+price_plot = make_plot_component("AvgTradePrice", page=1)
 
 model = MicrogridModel()
 
@@ -125,8 +121,10 @@ page = SolaraViz(
         grid_plot,
         soc_plot,
         orders_plot,
+        trade_plot,
+        price_plot,
         (AgentHouseholdPlots, 2),
     ],
     model_params=model_params,
-    name="P2P Microgrid (Phase 2)",
+    name="P2P Microgrid (Phase 4a CDA)",
 )

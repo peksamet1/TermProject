@@ -41,6 +41,8 @@ class SimulationConfig:
     num_prosumers: int = 6
     num_consumers: int = 4
     pv_peak_kw: float = 5.0
+    # "cda" = Continuous Double Auction (default); "logging" = no-P2P baseline
+    market_backend: str = "cda"
     battery: BatteryConfig = field(default_factory=BatteryConfig)
     tariff: TariffConfig = field(default_factory=TariffConfig)
     seed: int = 42

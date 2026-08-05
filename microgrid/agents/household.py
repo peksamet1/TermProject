@@ -57,6 +57,7 @@ class HouseholdAgent(Agent, ABC):
         self.battery_flow_kwh = 0.0  # >0 charging, <0 discharging (household side)
         self.residual_kwh = 0.0  # after battery, what goes to the market
         self.state = HouseholdState.IDLE
+        self.cash_tl = 0.0  # cumulative P2P + grid settlement balance
 
     @abstractmethod
     def generation(self, step: int) -> float:

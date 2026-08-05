@@ -1,7 +1,6 @@
 """Headless simulation run: prints a daily summary and saves plots.
 
 Usage: python run.py
-Serves as a quick smoke test while there is no visual simulation yet.
 """
 
 from __future__ import annotations
@@ -30,15 +29,18 @@ def main() -> None:
     print(f"Simulated {config.num_days} day(s), {config.total_steps} steps "
           f"({config.step_hours * 60:.0f} min each)")
     print(f"Agents: {config.num_prosumers} prosumers, {config.num_consumers} consumers")
+    print(f"Market backend: {config.market_backend}")
     print()
     header = (f"{'Day':>3} | {'Gen kWh':>8} | {'Cons kWh':>8} | "
-              f"{'Import kWh':>10} | {'Export kWh':>10} | {'Buy':>5} | {'Sell':>5}")
+              f"{'Local kWh':>9} | {'Import kWh':>10} | {'Export kWh':>10} | "
+              f"{'Buy':>5} | {'Sell':>5}")
     print(header)
     print("-" * len(header))
     for day, group in df.groupby("Day"):
         print(
             f"{day:>3} | {group['TotalGeneration'].sum():>8.1f} | "
             f"{group['TotalConsumption'].sum():>8.1f} | "
+            f"{group['LocalTradedKwh'].sum():>9.1f} | "
             f"{group['GridImport'].sum():>10.1f} | "
             f"{group['GridExport'].sum():>10.1f} | "
             f"{int(group['BuyOrders'].sum()):>5} | "
@@ -46,8 +48,11 @@ def main() -> None:
         )
     print()
     total_orders = len(model.market.orders)
-    print(f"Total orders logged: {total_orders} "
-          f"(market is a Phase 2 stub; no matching yet)")
+    total_local = df["LocalTradedKwh"].sum()
+    print(f"Total orders: {total_orders}")
+    print(f"Total local P2P energy: {total_local:.1f} kWh")
+    if hasattr(model.market, "trades"):
+        print(f"Total trades: {len(model.market.trades)}")
 
     RESULTS_DIR.mkdir(exist_ok=True)
     hours = df.index * config.step_hours
@@ -55,11 +60,12 @@ def main() -> None:
     fig, (ax_energy, ax_soc) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
     ax_energy.plot(hours, df["TotalGeneration"], label="Generation", color="tab:orange")
     ax_energy.plot(hours, df["TotalConsumption"], label="Consumption", color="tab:blue")
+    ax_energy.plot(hours, df["LocalTradedKwh"], label="Local P2P", color="tab:green")
     ax_energy.plot(hours, df["GridImport"], label="Grid import", color="tab:red", alpha=0.6)
-    ax_energy.plot(hours, df["GridExport"], label="Grid export", color="tab:green", alpha=0.6)
+    ax_energy.plot(hours, df["GridExport"], label="Grid export", color="tab:olive", alpha=0.6)
     ax_energy.set_ylabel("kWh per step")
     ax_energy.legend(loc="upper right")
-    ax_energy.set_title("Community energy balance")
+    ax_energy.set_title("Community energy balance (CDA)")
 
     ax_soc.plot(hours, df["AvgProsumerSoC"] * 100, color="tab:purple")
     ax_soc.set_ylabel("Avg prosumer SoC (%)")

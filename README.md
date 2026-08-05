@@ -12,9 +12,10 @@ doğrudan takas edebildiği bir mikrogrid simülasyonu.
 | Faz | Kapsam | Durum |
 |---|---|---|
 | 1 | Literatür taraması ve gereksinim analizi | Tamamlandı |
-| 2 | Mesa ile ajan mantığı ve enerji profilleri | **Tamamlandı (bu repo)** |
-| 3 | ZeroMQ P2P iletişim altyapısı | Placeholder (`microgrid/comm/`) |
-| 4 | CDA pazar takas algoritması | Stub (`microgrid/market/`) |
+| 2 | Mesa ile ajan mantığı ve enerji profilleri | Tamamlandı |
+| 3 | ZeroMQ P2P iletişim altyapısı | Protokol hazır; socket'ler bekliyor (`comm/protocol.py`) |
+| 4a | CDA eşleştirme + wire protokolü | **Tamamlandı (bu repo)** |
+| 4b | Zengin SoC/fiyat batarya stratejisi | Ertelendi (ZeroMQ sonrası) |
 | 5 | Mesa-SimPy ko-simülasyon entegrasyonu | Başlanmadı |
 | 6 | Veri analizi ve final dokümantasyon | Başlanmadı |
 
@@ -26,74 +27,73 @@ python -m venv .venv
 pip install -r requirements.txt
 
 python run.py          # headless koşu: konsol özeti + results/summary.png
-solara run app.py      # etkileşimli SolaraViz paneli (tarayıcıda açılır)
-                       #   Page 0: topluluk enerji dengesi + grid ithalat/ihracat
-                       #   Page 1: ortalama SoC + BUY/SELL emir sayilari
-                       #   Page 2: hane bazli generation/consumption + buy/sell order
+solara run app.py      # etkileşimli SolaraViz paneli
+                       #   Page 0: enerji dengesi + LocalTradedKwh + grid
+                       #   Page 1: SoC, emirler, local trade hacmi/fiyat
+                       #   Page 2: hane bazli generation/consumption + orders
 pytest                 # test paketi
 ```
+
+`market_backend`: varsayılan `"cda"`; baseline için `"logging"`.
 
 ## Mimari
 
 ```
 microgrid/
-├── config.py        SimulationConfig / BatteryConfig / TariffConfig — tüm parametreler tek yerde
-├── model.py         MicrogridModel: ajan yaratımı, adım döngüsü, DataCollector
-├── agents/
-│   ├── household.py HouseholdAgent (soyut) + ProsumerAgent + ConsumerAgent
-│   ├── battery.py   Battery: SoC penceresi, güç limitleri, round-trip verim
-│   └── strategy.py  TradingStrategy: residual -> fiyatlı Order dönüşümü
-├── profiles/
-│   ├── solar.py     Sentetik PV üretimi (sinüs + bulut gürültüsü)
-│   └── consumption.py  Çift tepeli hane yükü (sabah/akşam pikleri)
+├── config.py        SimulationConfig (market_backend dahil)
+├── model.py         MicrogridModel + DataCollector + cash_tl settlement
+├── agents/          HouseholdAgent, Battery, TradingStrategy (Phase 2; 4a'da aynı)
+├── profiles/        Sentetik PV + tüketim
 ├── market/
-│   └── base.py      Order, MarketInterface (ABC), LoggingMarket (Phase 2 stub)
-└── comm/            Phase 3'te ZeroMQ katmanı (PUB-SUB + REQ-REP) buraya gelecek
+│   ├── base.py      Order, MarketInterface, SettlementResult, LoggingMarket
+│   └── cda.py       CDAMarket, Trade (submit anında match, settle → grid)
+└── comm/
+    └── protocol.py  ZeroMQ-ready JSON wire şeması (STATUS/ORDER/TRADE/SETTLE/NACK)
 ```
 
 Veri akışı (her 15 dakikalık adımda):
 
-1. Model, ajanları rastgele sırayla aktive eder (`agents.shuffle_do("step")`).
-2. Her ajan üretim ve tüketimini profillerinden okur, net enerjisini hesaplar.
-3. Batarya varsa önce o düzeltir: fazla şarja, açık deşarja gider.
-4. Kalan bakiye `TradingStrategy` üzerinden fiyatlandırılıp pazara `Order`
-   olarak gönderilir (fazla → SELL, açık → BUY, ~0 → IDLE).
-5. Model adım sonu agregalarını hesaplar ve `DataCollector` kaydeder.
+1. `shuffle_do("step")` — ajanlar residual hesaplar, batarya-önce, emir gönderir.
+2. Her `submit` CDA order book'ta anında eşleşmeyi dener (midpoint fiyat).
+3. `settle_step` kalan BUY/SELL'i makro-gride yazar; book temizlenir.
+4. Ajan `cash_tl` local trade + grid fallback ile güncellenir; DataCollector kaydeder.
+
+## Phase 4a CDA kuralları
+
+- Bid fiyatı >= ask fiyatı → match; clearing = midpoint.
+- Kısmi dolum desteklenir.
+- Öncelik: alışta en yüksek / satışta en düşük fiyat; eşitlikte erken arrival.
+- `LoggingMarket` silinmedi (`market_backend="logging"`) — Phase 6 baseline.
+
+## Wire protokolü (Phase 3 zemini)
+
+Taşıma birimi: UTF-8 JSON string. ZeroMQ'ya Python object verilmez.
+
+Zarf (her mesaj): `type`, `v`, `msg_id`, `sender_id`, `step`, `corr_id?`, `topic?`
+
+| type | Phase 3 pattern | Rol |
+|---|---|---|
+| `STATUS` | PUB-SUB topic `status` | Enerji durumu yayını |
+| `ORDER` | PUB `order` veya REQ | Bid/ask |
+| `TRADE` | PUB `trade` veya REP | Eşleşme sonucu (`corr_id` korunur) |
+| `SETTLE` | PUB `settle` | Period sonu grid/local özet |
+| `NACK` | REP | Emir reddi |
+
+Framing (Phase 3'te kodlanacak): PUB-SUB multipart `[topic, json]`; REQ-REP tek frame JSON.
+
+API: `encode_message` / `decode_message` — `microgrid.comm.protocol`.
 
 ## Kritik Tasarım Kararları
 
-**Rol ≠ tip.** Alıcı/satıcı olmak sınıfın değil, o adımdaki net enerjinin
-sonucudur: prosumer öğlen satıcı, akşam alıcıdır. Bu yüzden tüm karar akışı
-soyut `HouseholdAgent.step()` içinde (template method); alt sınıflar yalnızca
-yapısal farkları tanımlar. `ProsumerAgent` = PV + batarya, `ConsumerAgent` =
-`generation() == 0`, bataryasız ince sınıf. Hiyerarşi bilinçli olarak iki
-seviyede sabit — üretim tipi çeşitlenirse kalıtım değil profil kompozisyonu
-değişir.
+**Rol ≠ tip.** Al/sat o adımdaki net enerjiden gelir; sınıflar yapısal farkı taşır.
 
-**Batarya-önce-pazar önceliği.** Round-trip verim kaybına rağmen öz-tüketim,
-feed-in/perakende makasından her zaman daha kârlı olduğu için ajan önce
-bataryasını kullanır, pazara yalnızca kalan bakiye gider.
+**Batarya-önce-pazar (4a).** Strateji zenginleştirilmedi; satılması önemli, SoC eşikleri 4b.
 
-**Pazar bir arayüz, Phase 2'de sadece log.** `LoggingMarket` hiçbir emri
-eşleştirmez: her BUY makro-gridden ithalata, her SELL feed-in tarifesinden
-ihracata düşer. Bu bilinçli bir tasarım — Phase 6'daki "no-P2P baseline"
-tam olarak budur. Phase 4'te CDA motoru aynı `MarketInterface`'i implemente
-edecek, ajan koduna dokunulmayacak.
+**Pazar arayüzü.** Ajanlar yalnızca `market.submit(order)`; CDA veya Logging arkada.
 
-**Fiyatlar tarife bandının içinde.** Türkiye'nin çift kademeli tarifesinde
-feed-in (varsayılan 1.20 TL/kWh) ile perakende (3.50 TL/kWh) arasındaki her
-yerel takas iki taraf için de kazançlıdır. `TradingStrategy` satış fiyatını
-bandın altından, alış fiyatını üstünden marjla yerleştirir; bid > ask
-kalması CDA'nın eşleşme bulabilmesinin ön koşuludur.
+**Keyword-only model kurucusu.** SolaraViz uyumu.
 
-**Keyword-only model kurucusu.** SolaraViz modeli `model_params`'tan yeniden
-yarattığı için `MicrogridModel` pozisyonel argüman kabul etmez. Slider'a
-bağlanan skalerler (`num_prosumers`, `pv_peak_kw`, ...) config varsayılanlarını
-ezer.
-
-**Battery sınıfı framework-bağımsız.** Mesa'ya referansı yok; Phase 5'te aynı
-sınıf SimPy süreçleriyle sürülecek. Round-trip kayıp, şarj ve deşarj yönüne
-eşit bölünür (tek yön verim = sqrt(round_trip)).
+**Battery framework-bağımsız.** Phase 5 SimPy için hazır.
 
 ## Birim Konvansiyonları ve Varsayılanlar
 
@@ -101,29 +101,16 @@ eşit bölünür (tek yön verim = sqrt(round_trip)).
 |---|---|---|
 | Zaman adımı | 15 dk (96 adım/gün) | `steps_per_day=96` |
 | Enerji | kWh/adım | — |
-| Güç | kW (`step_hours` ile çevrilir) | PV tepe 5 kW, batarya 5 kW |
-| SoC | [0, 1] kesir | pencere [0.10, 0.95], başlangıç 0.50 |
+| Güç | kW | PV tepe 5 kW, batarya 5 kW |
+| SoC | [0, 1] | [0.10, 0.95], başlangıç 0.50 |
 | Fiyat | TL/kWh | feed-in 1.20, perakende 3.50 |
-| Rastgelelik | numpy `Generator`, tek seed | `seed=42` |
-
-Tüm varsayılanlar `microgrid/config.py` içindeki dataclass'lardadır.
+| Pazar | — | `market_backend=cda` |
 
 ## Test Stratejisi
 
-Her modülün kendi test dosyası vardır ve modül testiyle birlikte "bitti"
-sayılır (`pytest` ile koşulur):
+- `test_battery.py`, `test_profiles.py`, `test_agents.py` — Phase 2
+- `test_protocol.py` — JSON round-trip, zarf, bozuk mesaj, sürüm
+- `test_cda.py` — match, midpoint, partial fill, priority, grid fallback, baseline karşılaştırma
+- `test_model.py` — enerji korunumu (`sum(residual) == export - import`), SoC, DataCollector
 
-- `test_battery.py` — güç/kapasite limitleri, verim kaybı, SoC sınırları,
-  geçersiz girdi reddi.
-- `test_profiles.py` — gece PV=0, öğlen tepe, günlük tüketim 5-25 kWh bandı,
-  aynı seed → aynı seri.
-- `test_agents.py` — surplus→SELL / deficit→BUY / denge→IDLE; batarya-önce-pazar
-  önceliği. Rastgeleliğe bağımlılığı kırmak için elle yazılmış `ConstantProfile`
-  stub'ları kullanılır.
-- `test_model.py` — tam gün koşu, **enerji korunumu değişmezi**
-  (üretim − tüketim − batarya akışı = ihracat − ithalat, her adımda), SoC
-  sınır ihlali olmaması, seed tekrarlanabilirliği, gündüz-satış/akşam-alış
-  davranış doğrulaması.
-
-Enerji korunumu testi, Phase 4-5'te pazar ve ko-simülasyon kodu değişirken
-ana regresyon güvencemizdir.
+Enerji korunumu: yerel trade'ler birbirini götürür; grid yalnızca unmatched hacimdir.

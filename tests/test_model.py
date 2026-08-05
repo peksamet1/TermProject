@@ -26,16 +26,31 @@ def test_agent_counts_and_types(config):
 
 
 def test_energy_conservation_each_step(config):
-    """generation - consumption - battery_flow == residual == export - import."""
+    """Submitted order net equals grid export - import (local trades cancel).
+
+    Residuals below TradingStrategy.min_order never enter the book, so the
+    agent-level residual sum may differ from the market net by at most dust.
+    """
+    from microgrid.market.base import OrderSide
+
     model = MicrogridModel(config=config)
     for _ in range(config.steps_per_day):
         model.step()
-        lhs = sum(
+        step = model.current_step - 1
+        orders = model.market.orders_at(step)
+        order_net = sum(
+            o.quantity_kwh if o.side is OrderSide.SELL else -o.quantity_kwh
+            for o in orders
+        )
+        assert order_net == pytest.approx(
+            model.grid_export_kwh - model.grid_import_kwh, abs=1e-9
+        )
+        residual_sum = sum(
             a.generation_kwh - a.consumption_kwh - a.battery_flow_kwh
             for a in model.agents
         )
-        rhs = model.grid_export_kwh - model.grid_import_kwh
-        assert lhs == pytest.approx(rhs, abs=1e-9)
+        # Dust: residuals too small to become orders (|r| < min_order).
+        assert residual_sum == pytest.approx(order_net, abs=0.01 * len(model.agents) + 1e-9)
 
 
 def test_soc_stays_within_bounds(config):
@@ -79,6 +94,9 @@ def test_datacollector_reports_all_measures(config):
         "TotalConsumption",
         "GridImport",
         "GridExport",
+        "LocalTradedKwh",
+        "LocalTradeCount",
+        "AvgTradePrice",
         "BuyOrders",
         "SellOrders",
         "AvgProsumerSoC",
