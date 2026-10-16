@@ -3,19 +3,29 @@
 Phase 3 will wrap these strings in PUB-SUB multipart frames
 ``[topic_bytes, json_utf8]`` or REQ-REP single-frame bodies. Phase 4a only
 defines encode/decode and the schema.
+
+Version 2 changes (Phase 1, frozen data structures):
+- Every message carries ``sent_at`` (sender's Unix time in seconds), used to
+  measure communication latency.
+- ORDER carries ``seq``: the send order within a step. Every node feeds its
+  CDA copy in (seq, agent_id) order, so all copies produce the same trades.
+- TRADE and NACK carry the id of the agent that sent them as ``sender_id``;
+  there is no central "market" node any more.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Literal, Union
 
 from microgrid.market.base import Order, OrderSide
 
-PROTOCOL_VERSION = 1
+# Bumped to 2 when sent_at and seq were added (see module docstring).
+PROTOCOL_VERSION = 2
 
 MessageType = Literal["STATUS", "ORDER", "TRADE", "SETTLE", "NACK"]
 
@@ -26,6 +36,11 @@ class ProtocolError(ValueError):
 
 def _new_id() -> str:
     return str(uuid.uuid4())
+
+
+def _now() -> float:
+    """Current Unix time in seconds; stamped into ``sent_at``."""
+    return time.time()
 
 
 @dataclass(frozen=True)
@@ -43,6 +58,7 @@ class StatusMessage:
     soc: float | None = None
     corr_id: str | None = None
     topic: str | None = "status"
+    sent_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +74,8 @@ class OrderMessage:
     price_tl_per_kwh: float
     corr_id: str | None = None
     topic: str | None = "order"
+    seq: int | None = None
+    sent_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +91,7 @@ class TradeMessage:
     price_tl_per_kwh: float
     corr_id: str | None = None
     topic: str | None = "trade"
+    sent_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +108,7 @@ class SettleMessage:
     avg_trade_price: float | None = None
     corr_id: str | None = None
     topic: str | None = "settle"
+    sent_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +122,7 @@ class NackMessage:
     reason: str
     corr_id: str | None = None
     topic: str | None = None
+    sent_at: float | None = None
 
 
 Message = Union[StatusMessage, OrderMessage, TradeMessage, SettleMessage, NackMessage]
@@ -182,10 +203,12 @@ def decode_message(raw: str) -> Message:
 def make_order_message(
     order: Order,
     *,
+    seq: int | None = None,
     sender_id: str | None = None,
     corr_id: str | None = None,
     msg_id: str | None = None,
 ) -> OrderMessage:
+    """Wrap an Order for the wire. ``seq`` is the send order within the step."""
     return OrderMessage(
         type="ORDER",
         v=PROTOCOL_VERSION,
@@ -198,6 +221,8 @@ def make_order_message(
         price_tl_per_kwh=order.price_tl_per_kwh,
         corr_id=corr_id,
         topic="order",
+        seq=seq,
+        sent_at=_now(),
     )
 
 
@@ -240,6 +265,7 @@ def make_status_message(
         soc=soc_out,
         corr_id=None,
         topic="status",
+        sent_at=_now(),
     )
 
 
@@ -250,10 +276,12 @@ def make_trade_message(
     quantity_kwh: float,
     price_tl_per_kwh: float,
     step: int,
-    sender_id: str = "market",
+    sender_id: str,
     corr_id: str | None = None,
     msg_id: str | None = None,
 ) -> TradeMessage:
+    """Build a TRADE. ``sender_id`` is the agent sending it (buyer proposes,
+    seller confirms); there is no central market node."""
     return TradeMessage(
         type="TRADE",
         v=PROTOCOL_VERSION,
@@ -266,6 +294,7 @@ def make_trade_message(
         price_tl_per_kwh=price_tl_per_kwh,
         corr_id=corr_id,
         topic="trade",
+        sent_at=_now(),
     )
 
 
@@ -293,6 +322,7 @@ def make_settle_message(
         avg_trade_price=avg_trade_price,
         corr_id=None,
         topic="settle",
+        sent_at=_now(),
     )
 
 
@@ -301,10 +331,11 @@ def make_nack_message(
     step: int,
     ref_msg_id: str,
     reason: str,
+    sender_id: str,
     corr_id: str | None = None,
-    sender_id: str = "market",
     msg_id: str | None = None,
 ) -> NackMessage:
+    """Build a NACK. ``sender_id`` is the agent rejecting the request."""
     return NackMessage(
         type="NACK",
         v=PROTOCOL_VERSION,
@@ -315,4 +346,5 @@ def make_nack_message(
         reason=reason,
         corr_id=corr_id,
         topic=None,
+        sent_at=_now(),
     )
