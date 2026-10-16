@@ -1,2 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+results/
+
+# macOS metadata
 .DS_Store
 **/.DS_Store
