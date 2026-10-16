@@ -9,17 +9,20 @@ doğrudan takas edebildiği bir mikrogrid simülasyonu.
 
 ## Faz Durumu
 
-| Faz | Kapsam | Durum |
-|---|---|---|
-| 1 | Literatür taraması ve gereksinim analizi | Tamamlandı |
-| 2 | Mesa ile ajan mantığı ve enerji profilleri | Tamamlandı |
-| 3 | ZeroMQ P2P iletişim altyapısı | Protokol hazır; socket'ler bekliyor (`comm/protocol.py`) |
-| 4a | CDA eşleştirme + wire protokolü | **Tamamlandı (bu repo)** |
-| 4b | Zengin SoC/fiyat batarya stratejisi | Ertelendi (ZeroMQ sonrası) |
-| 5 | Mesa-SimPy ko-simülasyon entegrasyonu | Başlanmadı |
-| 6 | Veri analizi ve final dokümantasyon | Başlanmadı |
+Fazlar PSD 8.1'i izler; ayrıntılar Geliştirme Planı dokümanında.
+
+| Faz | Kapsam | Lider | Durum |
+|---|---|---|---|
+| 1 | Literatür, gereksinimler, tek kod tabanı, sabit veri yapıları | Tüm ekip | Tamamlandı |
+| 2 | Mesa ile ajan mantığı ve enerji profilleri | Erol | Çekirdek hazır; CSV verisi ve SoC'ye duyarlı strateji kaldı |
+| 3 | ZeroMQ P2P iletişim altyapısı | Kutluay | Protokol v2 hazır; soketler bekliyor |
+| 4 | CDA piyasa mekanizması (ZeroMQ üzerinden) | Yusuf | Süreç içi CDA hazır; `cda_zmq` kaldı |
+| 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | Başlanmadı |
+| 6 | Veri analizi ve final dokümantasyon | Yusuf | Başlanmadı |
 
 ## Kurulum ve Çalıştırma
+
+**Gereksinim:** Python 3.12 veya üstü (Mesa 3.5 bunu istiyor).
 
 ```powershell
 python -m venv .venv
@@ -48,17 +51,20 @@ microgrid/
 │   ├── base.py      Order, MarketInterface, SettlementResult, LoggingMarket
 │   └── cda.py       CDAMarket, Trade (submit anında match, settle → grid)
 └── comm/
-    └── protocol.py  ZeroMQ-ready JSON wire şeması (STATUS/ORDER/TRADE/SETTLE/NACK)
+    └── protocol.py  ZeroMQ-ready JSON wire şeması (STATUS/ORDER/TRADE/SETTLE/NACK), v2
 ```
 
-Veri akışı (her 15 dakikalık adımda):
+Her 15 dakikalık adım (`MicrogridModel.step()`) dört aşamadan oluşur. Her faz
+yalnızca kendi aşamasına yazar, böylece paralel çalışmada çakışma olmaz:
 
-1. `shuffle_do("step")` — ajanlar residual hesaplar, batarya-önce, emir gönderir.
-2. Her `submit` CDA order book'ta anında eşleşmeyi dener (midpoint fiyat).
-3. `settle_step` kalan BUY/SELL'i makro-gride yazar; book temizlenir.
-4. Ajan `cash_tl` local trade + grid fallback ile güncellenir; DataCollector kaydeder.
+1. `_agents_step()` — ajanlar residual hesaplar, batarya-önce, emir gönderir;
+   her `submit` CDA order book'ta anında eşleşmeyi dener (midpoint fiyat). (Faz 2)
+2. `_market_settle()` — `settle_step` kalan BUY/SELL'i makro-gride yazar, book
+   temizlenir; `cash_tl` local trade + grid fallback ile güncellenir. (Faz 4)
+3. `_physics_slot()` — SimPy batarya simülasyonu; şimdilik boş. (Faz 5)
+4. `_collect()` — DataCollector kaydeder.
 
-## Phase 4a CDA kuralları
+## CDA kuralları
 
 - Bid fiyatı >= ask fiyatı → match; clearing = midpoint.
 - Kısmi dolum desteklenir.
@@ -69,7 +75,16 @@ Veri akışı (her 15 dakikalık adımda):
 
 Taşıma birimi: UTF-8 JSON string. ZeroMQ'ya Python object verilmez.
 
-Zarf (her mesaj): `type`, `v`, `msg_id`, `sender_id`, `step`, `corr_id?`, `topic?`
+Zarf (her mesaj): `type`, `v`, `msg_id`, `sender_id`, `step`, `corr_id?`, `topic?`, `sent_at`
+
+Protokol sürümü 2 (`PROTOCOL_VERSION = 2`):
+
+- `sent_at`: gönderenin Unix zamanı (sn); gecikme ölçümü için her mesajda.
+- `seq`: ORDER'ın o adımdaki gönderim sırası; her düğüm CDA kopyasını
+  (seq, agent_id) sırasıyla besler, böylece tüm kopyalar aynı işlemleri bulur.
+- TRADE ve NACK'te `sender_id` gönderen ajanın id'sidir (zorunlu); merkezi
+  "market" düğümü yoktur.
+- Sürüm 1 mesajları reddedilir.
 
 | type | Phase 3 pattern | Rol |
 |---|---|---|
@@ -87,7 +102,7 @@ API: `encode_message` / `decode_message` — `microgrid.comm.protocol`.
 
 **Rol ≠ tip.** Al/sat o adımdaki net enerjiden gelir; sınıflar yapısal farkı taşır.
 
-**Batarya-önce-pazar (4a).** Strateji zenginleştirilmedi; satılması önemli, SoC eşikleri 4b.
+**Batarya-önce-pazar.** Strateji henüz sabit marjlı; SoC'ye duyarlı strateji Faz 2'de.
 
 **Pazar arayüzü.** Ajanlar yalnızca `market.submit(order)`; CDA veya Logging arkada.
 
@@ -109,7 +124,7 @@ API: `encode_message` / `decode_message` — `microgrid.comm.protocol`.
 ## Test Stratejisi
 
 - `test_battery.py`, `test_profiles.py`, `test_agents.py` — Phase 2
-- `test_protocol.py` — JSON round-trip, zarf, bozuk mesaj, sürüm
+- `test_protocol.py` — JSON round-trip, zarf, bozuk mesaj, sürüm, v2 alanları (`sent_at`, `seq`, `sender_id`)
 - `test_cda.py` — match, midpoint, partial fill, priority, grid fallback, baseline karşılaştırma
 - `test_model.py` — enerji korunumu (`sum(residual) == export - import`), SoC, DataCollector
 

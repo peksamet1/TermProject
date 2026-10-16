@@ -168,12 +168,31 @@ class MicrogridModel(Model):
             agent.cash_tl -= unmatched_buy * tariff.retail_tl_per_kwh
             agent.cash_tl += unmatched_sell * tariff.feed_in_tl_per_kwh
 
-    def step(self) -> None:
-        self.agents.shuffle_do("step")
+    # ------------------------------------------------------------------
+    # One simulation step = four stages, always in this order.
+    # Each later project phase writes only into its own stage:
+    #   Phase 2 -> _agents_step, Phase 4 -> _market_settle,
+    #   Phase 5 -> _physics_slot, Phase 5/6 -> _collect.
+    # This keeps parallel work by different team members conflict-free.
+    # ------------------------------------------------------------------
 
+    def step(self) -> None:
+        self._agents_step()
+        self._market_settle()
+        self._physics_slot()
+        self._collect()
+        self.current_step += 1
+
+    def _agents_step(self) -> None:
+        """Stage 1/4: every agent reads its profile, plans its battery and
+        submits an order. Random order gives CDA time priority."""
+        self.agents.shuffle_do("step")
         self.total_generation_kwh = sum(a.generation_kwh for a in self.agents)
         self.total_consumption_kwh = sum(a.consumption_kwh for a in self.agents)
 
+    def _market_settle(self) -> None:
+        """Stage 2/4: close the market for this step, send unmatched volume
+        to the macro grid and update every agent's cash."""
         settlement = self.market.settle_step(self.current_step, self.config.tariff)
         self.grid_import_kwh = settlement.grid_import_kwh
         self.grid_export_kwh = settlement.grid_export_kwh
@@ -191,8 +210,15 @@ class MicrogridModel(Model):
         self.buy_orders = sum(1 for o in step_orders if o.side is OrderSide.BUY)
         self.sell_orders = sum(1 for o in step_orders if o.side is OrderSide.SELL)
 
+    def _physics_slot(self) -> None:
+        """Stage 3/4: physical battery simulation with SimPy.
+
+        Empty for now; Phase 5 adds PhysicalSimulator.run_slot() here.
+        """
+
+    def _collect(self) -> None:
+        """Stage 4/4: record this step's data."""
         self.datacollector.collect(self)
-        self.current_step += 1
 
     def run(self, num_steps: int | None = None) -> None:
         num_steps = num_steps if num_steps is not None else self.config.total_steps

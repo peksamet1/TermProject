@@ -84,6 +84,7 @@ def test_trade_encodes_through_protocol():
         quantity_kwh=trade.quantity_kwh,
         price_tl_per_kwh=trade.price_tl_per_kwh,
         step=trade.step,
+        sender_id=str(trade.seller_id),
     )
     decoded = decode_message(encode_message(msg))
     assert decoded.quantity_kwh == pytest.approx(trade.quantity_kwh)

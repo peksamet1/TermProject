@@ -50,6 +50,7 @@ def test_trade_round_trip():
         quantity_kwh=trade.quantity_kwh,
         price_tl_per_kwh=trade.price_tl_per_kwh,
         step=trade.step,
+        sender_id="1",
         corr_id="abc",
     )
     decoded = decode_message(encode_message(msg))
@@ -58,6 +59,7 @@ def test_trade_round_trip():
     assert decoded.seller_id == 1
     assert decoded.quantity_kwh == pytest.approx(0.5)
     assert decoded.corr_id == "abc"
+    assert decoded.sender_id == "1"
 
 
 def test_status_nan_soc_becomes_null():
@@ -87,7 +89,7 @@ def test_settle_and_nack_round_trip():
     assert decode_message(encode_message(settle)).trade_count == 4
 
     nack = make_nack_message(
-        step=9, ref_msg_id="m1", reason="invalid", corr_id="c1"
+        step=9, ref_msg_id="m1", reason="invalid", sender_id="1", corr_id="c1"
     )
     decoded = decode_message(encode_message(nack))
     assert decoded.type == "NACK"
@@ -111,18 +113,61 @@ def test_invalid_json_raises():
 
 def test_unknown_type_raises():
     with pytest.raises(ProtocolError):
-        decode_message('{"type":"FOO","v":1,"msg_id":"x","sender_id":"1","step":0}')
+        decode_message('{"type":"FOO","v":2,"msg_id":"x","sender_id":"1","step":0}')
 
 
 def test_missing_field_raises():
     with pytest.raises(ProtocolError):
         decode_message(
-            '{"type":"ORDER","v":1,"msg_id":"x","sender_id":"1","step":0,"agent_id":1}'
+            '{"type":"ORDER","v":2,"msg_id":"x","sender_id":"1","step":0,"agent_id":1}'
         )
 
 
 def test_wrong_version_raises():
     raw = encode_message(make_order_message(Order(1, OrderSide.BUY, 0.1, 2.0, 0)))
-    raw = raw.replace('"v":1', '"v":99')
+    raw = raw.replace('"v":2', '"v":99')
     with pytest.raises(ProtocolError):
         decode_message(raw)
+
+
+# --- Protocol version 2: sent_at, seq and agent sender ids -----------------
+
+
+def test_every_message_carries_sent_at():
+    order = make_order_message(Order(1, OrderSide.BUY, 0.1, 2.0, 0))
+    status = make_status_message(
+        agent_id=1, step=0, generation_kwh=0.0, consumption_kwh=0.1,
+        residual_kwh=-0.1, state="BUYING",
+    )
+    trade = make_trade_message(
+        buyer_id=2, seller_id=1, quantity_kwh=0.1, price_tl_per_kwh=2.0,
+        step=0, sender_id="2",
+    )
+    nack = make_nack_message(step=0, ref_msg_id="m1", reason="x", sender_id="1")
+    for msg in (order, status, trade, nack):
+        decoded = decode_message(encode_message(msg))
+        # sent_at must survive the round trip (it is a real dataclass field).
+        assert isinstance(decoded.sent_at, float)
+        assert decoded.sent_at == pytest.approx(msg.sent_at)
+
+
+def test_order_seq_round_trip():
+    msg = make_order_message(Order(4, OrderSide.SELL, 0.3, 1.8, 2), seq=5)
+    decoded = decode_message(encode_message(msg))
+    assert decoded.seq == 5
+
+
+def test_trade_and_nack_require_sender_id():
+    # No default "market" sender any more: the sending agent must be named.
+    with pytest.raises(TypeError):
+        make_trade_message(  # type: ignore[call-arg]
+            buyer_id=2, seller_id=1, quantity_kwh=0.1, price_tl_per_kwh=2.0, step=0
+        )
+    with pytest.raises(TypeError):
+        make_nack_message(step=0, ref_msg_id="m1", reason="x")  # type: ignore[call-arg]
+
+
+def test_version_1_message_is_rejected():
+    raw = encode_message(make_order_message(Order(1, OrderSide.BUY, 0.1, 2.0, 0)))
+    with pytest.raises(ProtocolError):
+        decode_message(raw.replace('"v":2', '"v":1'))
