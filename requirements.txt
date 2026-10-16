@@ -1,0 +1,6 @@
+mesa[viz]~=3.5
+networkx
+numpy
+pandas
+matplotlib
+pytest
