@@ -1,6 +1,20 @@
+# Python 3.12+ is required (Mesa 3.5 needs it).
+
+# Agent-based modelling (Phase 2) and the SolaraViz dev panel
 mesa[viz]~=3.5
 networkx
+
+# Data handling and plots
 numpy
 pandas
 matplotlib
+plotly        # interactive result plots (Phase 6)
+
+# Brokerless P2P messaging between agents (Phase 3)
+pyzmq
+
+# Discrete-event battery / energy-flow simulation (Phase 5)
+simpy>=4
+
+# Tests
 pytest
