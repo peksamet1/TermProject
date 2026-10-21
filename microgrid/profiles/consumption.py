@@ -3,6 +3,9 @@
 Double-peaked daily load curve typical for residential users: a constant
 baseline plus Gaussian-shaped morning and evening peaks, with per-step noise.
 A per-household ``scale`` factor differentiates small and large households.
+
+Defaults are calibrated to an average Turkish home: ~200 kWh/month, i.e.
+~6.6 kWh/day (base 2.9 + morning 1.1 + evening 2.6 kWh).
 """
 
 from __future__ import annotations
@@ -23,13 +26,13 @@ class ConsumptionProfile:
         step_hours: float,
         steps_per_day: int,
         rng: np.random.Generator,
-        base_kw: float = 0.3,
-        morning_peak_kw: float = 0.8,
+        base_kw: float = 0.12,
+        morning_peak_kw: float = 0.3,
         morning_peak_hour: float = 7.5,
-        evening_peak_kw: float = 1.5,
+        evening_peak_kw: float = 0.52,
         evening_peak_hour: float = 20.0,
         scale: float = 1.0,
-        noise_sigma_kw: float = 0.05,
+        noise_sigma_kw: float = 0.02,
     ) -> None:
         if scale <= 0:
             raise ValueError("scale must be positive")

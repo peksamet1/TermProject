@@ -14,7 +14,7 @@ Fazlar PSD 8.1'i izler; ayrıntılar Geliştirme Planı dokümanında.
 | Faz | Kapsam | Lider | Durum |
 |---|---|---|---|
 | 1 | Literatür, gereksinimler, tek kod tabanı, sabit veri yapıları | Tüm ekip | Tamamlandı |
-| 2 | Mesa ile ajan mantığı ve enerji profilleri | Erol | Çekirdek hazır; CSV verisi ve SoC'ye duyarlı strateji kaldı |
+| 2 | Mesa ile ajan mantığı ve enerji profilleri | Erol | Çekirdek + veri hattı hazır (kalibre mock, CSV, Ausgrid/PVGIS); SoC'ye duyarlı strateji kaldı |
 | 3 | ZeroMQ P2P iletişim altyapısı | Kutluay | Protokol v2 hazır; soketler bekliyor |
 | 4 | CDA piyasa mekanizması (ZeroMQ üzerinden) | Yusuf | Süreç içi CDA hazır; `cda_zmq` kaldı |
 | 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | Başlanmadı |
@@ -37,6 +37,15 @@ solara run app.py      # etkileşimli SolaraViz paneli
 pytest                 # test paketi
 ```
 
+Gerçek veriyle koşu (indirme adımları: [data/README.md](data/README.md)):
+
+```powershell
+python scripts/fetch_pvgis.py                     # İstanbul PV, 1 kWp, saatlik
+python scripts/build_profiles.py --ausgrid "data/raw/ausgrid/<dosya>.csv" --pvgis data/raw/pvgis/istanbul_2019.json
+python run.py --profiles data/profiles_istanbul.csv --start 2013-01-15 --days 7
+python run.py --profiles data/sample/profiles_sample.csv --days 2   # küçük örnek dosya
+```
+
 `market_backend`: varsayılan `"cda"`; baseline için `"logging"`.
 
 ## Mimari
@@ -46,7 +55,8 @@ microgrid/
 ├── config.py        SimulationConfig (market_backend dahil)
 ├── model.py         MicrogridModel + DataCollector + cash_tl settlement
 ├── agents/          HouseholdAgent, Battery, TradingStrategy (Phase 2; 4a'da aynı)
-├── profiles/        Sentetik PV + tüketim
+├── profiles/        Sentetik PV + tüketim (İstanbul mevsimleri), CSV profilleri,
+│                    Ausgrid + PVGIS dönüştürücü (real_data.py)
 ├── market/
 │   ├── base.py      Order, MarketInterface, SettlementResult, LoggingMarket
 │   └── cda.py       CDAMarket, Trade (submit anında match, settle → grid)
@@ -119,11 +129,16 @@ API: `encode_message` / `decode_message` — `microgrid.comm.protocol`.
 | Güç | kW | PV tepe 5 kW, batarya 5 kW |
 | SoC | [0, 1] | [0.10, 0.95], başlangıç 0.50 |
 | Fiyat | TL/kWh | feed-in 1.20, perakende 3.50 |
+| Tüketim | kWh/gün | ~6.6 (≈200 kWh/ay, Türkiye ortalaması) |
+| Başlangıç günü | yılın günü | `start_day_of_year=172` (21 Haziran) |
+| Profil kaynağı | — | `profile_source=synthetic` (veya `csv`) |
 | Pazar | — | `market_backend=cda` |
 
 ## Test Stratejisi
 
 - `test_battery.py`, `test_profiles.py`, `test_agents.py` — Phase 2
+- `test_timeseries.py` — CSV okuma, i mod k eşleme, başa sarma, hatalı veri, iki kaynakla enerji korunumu
+- `test_real_data.py` — sahte Ausgrid/PVGIS dosyalarıyla dönüşüm (30→15 dk enerji korunur, ölçek, mevsim kaydırma)
 - `test_protocol.py` — JSON round-trip, zarf, bozuk mesaj, sürüm, v2 alanları (`sent_at`, `seq`, `sender_id`)
 - `test_cda.py` — match, midpoint, partial fill, priority, grid fallback, baseline karşılaştırma
 - `test_model.py` — enerji korunumu (`sum(residual) == export - import`), SoC, DataCollector
