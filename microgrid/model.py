@@ -19,8 +19,10 @@ from microgrid.agents.strategy import TradingStrategy
 from microgrid.config import SimulationConfig
 from microgrid.market.base import LoggingMarket, MarketInterface, OrderSide
 from microgrid.market.cda import CDAMarket
+from microgrid.profiles.base import EnergyProfile
 from microgrid.profiles.consumption import ConsumptionProfile
 from microgrid.profiles.solar import SolarProfile
+from microgrid.profiles.timeseries import ProfileTable
 
 
 def _build_market(backend: str) -> MarketInterface:
@@ -58,26 +60,25 @@ class MicrogridModel(Model):
         self.market = _build_market(backend)
         strategy = TradingStrategy(tariff=self.config.tariff)
         step_hours = self.config.step_hours
-        steps_per_day = self.config.steps_per_day
 
-        for _ in range(num_prosumers):
+        self._pv_peak_kw = pv_peak_kw
+        self._profile_table = self._load_profile_table()
+
+        # Household index i (prosumers first, then consumers) selects row
+        # group i mod k of the profile CSV in csv mode. In csv mode the file
+        # already holds each home's PV power, so pv_peak_kw is not used.
+        for i in range(num_prosumers):
             ProsumerAgent(
                 self,
-                solar_profile=SolarProfile(
-                    peak_kw=pv_peak_kw * float(self.rng.uniform(0.8, 1.2)),
-                    step_hours=step_hours,
-                    steps_per_day=steps_per_day,
-                    rng=self.rng,
-                    start_day_of_year=self.config.start_day_of_year,
-                ),
-                consumption_profile=self._make_consumption_profile(),
+                solar_profile=self._make_solar_profile(i),
+                consumption_profile=self._make_consumption_profile(i),
                 strategy=strategy,
                 battery=Battery.from_config(self.config.battery, step_hours),
             )
-        for _ in range(num_consumers):
+        for j in range(num_consumers):
             ConsumerAgent(
                 self,
-                consumption_profile=self._make_consumption_profile(),
+                consumption_profile=self._make_consumption_profile(num_prosumers + j),
                 strategy=strategy,
             )
 
@@ -118,7 +119,35 @@ class MicrogridModel(Model):
             },
         )
 
-    def _make_consumption_profile(self) -> ConsumptionProfile:
+    def _load_profile_table(self) -> ProfileTable | None:
+        source = self.config.profile_source
+        if source == "synthetic":
+            return None
+        if source == "csv":
+            if not self.config.profile_csv_path:
+                raise ValueError("profile_source='csv' needs profile_csv_path")
+            return ProfileTable.from_csv(
+                self.config.profile_csv_path,
+                step_hours=self.config.step_hours,
+                steps_per_day=self.config.steps_per_day,
+                start=self.config.profile_start,
+            )
+        raise ValueError(f"unknown profile_source {source!r}; use 'synthetic' or 'csv'")
+
+    def _make_solar_profile(self, index: int) -> EnergyProfile:
+        if self._profile_table is not None:
+            return self._profile_table.solar_profile(index)
+        return SolarProfile(
+            peak_kw=self._pv_peak_kw * float(self.rng.uniform(0.8, 1.2)),
+            step_hours=self.config.step_hours,
+            steps_per_day=self.config.steps_per_day,
+            rng=self.rng,
+            start_day_of_year=self.config.start_day_of_year,
+        )
+
+    def _make_consumption_profile(self, index: int) -> EnergyProfile:
+        if self._profile_table is not None:
+            return self._profile_table.consumption_profile(index)
         return ConsumptionProfile(
             step_hours=self.config.step_hours,
             steps_per_day=self.config.steps_per_day,
