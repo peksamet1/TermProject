@@ -68,6 +68,7 @@ class MicrogridModel(Model):
                     step_hours=step_hours,
                     steps_per_day=steps_per_day,
                     rng=self.rng,
+                    start_day_of_year=self.config.start_day_of_year,
                 ),
                 consumption_profile=self._make_consumption_profile(),
                 strategy=strategy,

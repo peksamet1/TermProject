@@ -23,8 +23,7 @@ from mesa import Agent
 from microgrid.agents.battery import Battery
 from microgrid.agents.strategy import TradingStrategy
 from microgrid.market.base import OrderSide
-from microgrid.profiles.consumption import ConsumptionProfile
-from microgrid.profiles.solar import SolarProfile
+from microgrid.profiles.base import EnergyProfile
 
 
 class HouseholdState(str, Enum):
@@ -41,7 +40,7 @@ class HouseholdAgent(Agent, ABC):
         self,
         model,
         *,
-        consumption_profile: ConsumptionProfile,
+        consumption_profile: EnergyProfile,
         strategy: TradingStrategy,
         battery: Battery | None = None,
     ) -> None:
@@ -113,8 +112,8 @@ class ProsumerAgent(HouseholdAgent):
         self,
         model,
         *,
-        solar_profile: SolarProfile,
-        consumption_profile: ConsumptionProfile,
+        solar_profile: EnergyProfile,
+        consumption_profile: EnergyProfile,
         strategy: TradingStrategy,
         battery: Battery | None = None,
     ) -> None:
