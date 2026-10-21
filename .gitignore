@@ -7,3 +7,7 @@ results/
 # macOS metadata
 .DS_Store
 **/.DS_Store
+
+# Raw downloads and generated profile files (see data/README.md)
+data/raw/
+data/profiles_*.csv
