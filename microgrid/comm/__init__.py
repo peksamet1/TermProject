@@ -1,8 +1,9 @@
 """Communication layer: wire protocol plus ZeroMQ peer sockets (Phase 3).
 
 - ``protocol``: frozen v2 JSON messages.
-- ``node``: ``PeerNode`` (PUB / SUB / REP sockets of one agent) and errors.
-- ``network``: ``PeerNetwork`` (full-mesh setup and teardown).
+- ``node``: ``PeerNode`` (PUB / SUB / REP sockets of one agent), ``CommStats``
+  and errors.
+- ``network``: ``PeerNetwork`` (full-mesh setup, readiness handshake, teardown).
 
 Phase 3 planned patterns (PSD 6.2):
 - PUB-SUB: STATUS / ORDER / TRADE / SETTLE (multipart topic + JSON)
@@ -10,7 +11,13 @@ Phase 3 planned patterns (PSD 6.2):
 """
 
 from microgrid.comm.network import PeerNetwork
-from microgrid.comm.node import CommError, HandshakeTimeout, PeerNode, StepTimeout
+from microgrid.comm.node import (
+    CommError,
+    CommStats,
+    HandshakeTimeout,
+    PeerNode,
+    StepTimeout,
+)
 from microgrid.comm.protocol import (
     NackMessage,
     OrderMessage,
@@ -30,6 +37,7 @@ from microgrid.comm.protocol import (
 
 __all__ = [
     "CommError",
+    "CommStats",
     "HandshakeTimeout",
     "NackMessage",
     "OrderMessage",

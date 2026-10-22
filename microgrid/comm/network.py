@@ -1,11 +1,20 @@
 """Full-mesh network of PeerNodes on one ZeroMQ context.
 
-Phase 3, step 1: setup and teardown only. Setup order is fixed:
+Setup order is fixed:
 1. raise OS / ZeroMQ resource limits (a full tcp mesh needs ~N^2 fds;
    the macOS default soft limit is 256),
 2. construct every node, which binds every PUB and REP,
 3. only then connect every SUB to all other PUBs (inproc does not
    guarantee connect-before-bind).
+
+``handshake()`` then makes the mesh usable. A SUB that has just connected
+misses whatever a PUB sends before the connection is up ("slow joiner"; in
+the prototype 100% of the first messages were lost). A fixed sleep either
+falls short (loss) or wastes time (skewed measurements), so every node
+re-broadcasts a handshake STATUS each ``handshake_interval_ms`` until every
+node has heard every other node. Being one process, the network checks this
+globally; a node counting only what it heard itself would not know whether
+its own PUB reaches the others.
 
 Teardown closes every node and then calls ``ctx.destroy(linger=0)``.
 ``ctx.term()`` is never used directly: it blocks forever while any socket
@@ -14,13 +23,15 @@ is still open, which is the number one cause of a hanging pytest run.
 
 from __future__ import annotations
 
+import math
+import time
 import warnings
 from types import TracebackType
 from typing import Iterable
 
 import zmq
 
-from microgrid.comm.node import PeerNode
+from microgrid.comm.node import CommError, CommStats, HandshakeTimeout, PeerNode
 from microgrid.config import CommConfig
 
 # Soft RLIMIT_NOFILE target when the hard limit is unlimited or larger.
@@ -72,6 +83,8 @@ class PeerNetwork:
         if len(set(ids)) != len(ids):
             raise ValueError(f"duplicate node ids: {ids}")
         self._closed = False
+        self._ready = False
+        self._stats = CommStats()
         self.nodes: dict[int, PeerNode] = {}
 
         if self.config.raise_fd_limit:
@@ -102,6 +115,83 @@ class PeerNetwork:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    def stats(self) -> CommStats:
+        """Snapshot of the network's communication counters."""
+        return CommStats(
+            handshake_ms=self._stats.handshake_ms,
+            handshake_rounds=self._stats.handshake_rounds,
+            handshake_leftovers=sum(n.handshake_leftovers for n in self.nodes.values()),
+        )
+
+    def unheard(self) -> dict[int, list[int]]:
+        """Per node, the peers it has not heard a handshake STATUS from."""
+        ids = set(self.nodes)
+        out: dict[int, list[int]] = {}
+        for node_id, node in self.nodes.items():
+            missing = sorted(ids - {node_id} - node.seen_peers)
+            if missing:
+                out[node_id] = missing
+        return out
+
+    def handshake(self) -> None:
+        """Block until every node has heard every other node, or time out.
+
+        Each round every node publishes one handshake STATUS; between rounds
+        the loop waits on all SUBs at once, so it wakes as soon as anything
+        arrives instead of sleeping a fixed time. Calling it again after
+        success is a no-op.
+        """
+        if self._closed:
+            raise CommError("network is closed")
+        if self._ready:
+            return
+        interval = self.config.handshake_interval_ms / 1000.0
+        poller = zmq.Poller()
+        for node in self.nodes.values():
+            poller.register(node.sub, zmq.POLLIN)
+
+        start = time.perf_counter()
+        deadline = start + self.config.handshake_timeout_s
+        next_round = start
+        rounds = 0
+        while True:
+            now = time.perf_counter()
+            if now >= next_round:
+                for node in self.nodes.values():
+                    node.publish_handshake()
+                rounds += 1
+                next_round = now + interval
+            for node in self.nodes.values():
+                node.drain(0)
+            unheard = self.unheard()
+            if not unheard:
+                break
+            now = time.perf_counter()
+            if now >= deadline:
+                self._stats.handshake_rounds = rounds
+                raise HandshakeTimeout(self._timeout_message(unheard, rounds))
+            wait_ms = math.ceil(1000.0 * (min(next_round, deadline) - now))
+            poller.poll(max(wait_ms, 0))
+
+        self._stats.handshake_ms = 1000.0 * (time.perf_counter() - start)
+        self._stats.handshake_rounds = rounds
+        for node in self.nodes.values():
+            node.ready = True
+        self._ready = True
+
+    def _timeout_message(self, unheard: dict[int, list[int]], rounds: int) -> str:
+        detail = "; ".join(
+            f"node {node_id} has not heard {missing}" for node_id, missing in unheard.items()
+        )
+        return (
+            f"readiness handshake timed out after {self.config.handshake_timeout_s} s "
+            f"({rounds} rounds, {len(self.nodes)} nodes): {detail}"
+        )
 
     def close(self) -> None:
         """Close every node, then destroy the context; safe to call twice."""
