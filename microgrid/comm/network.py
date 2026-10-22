@@ -16,6 +16,16 @@ node has heard every other node. Being one process, the network checks this
 globally; a node counting only what it heard itself would not know whether
 its own PUB reaches the others.
 
+``await_step(step)`` is the step barrier (Architecture 4.3). Every node waits
+for a STATUS from each peer and an ORDER from each peer whose STATUS is not
+IDLE; one poll over all SUBs serves every node, bounded by
+``step_timeout_s``. Whatever is still missing then is counted as lost and
+the step is marked degraded: the barrier never waits longer and never
+raises, because a node that missed an ORDER only diverges to the safe side
+(its trades get NACKed and fall back to the grid, Architecture 4.4). All
+nodes close the step together, after which ``orders_at`` / ``statuses_at``
+are readable on every node until the next step closes.
+
 Teardown closes every node and then calls ``ctx.destroy(linger=0)``.
 ``ctx.term()`` is never used directly: it blocks forever while any socket
 is still open, which is the number one cause of a hanging pytest run.
@@ -26,12 +36,20 @@ from __future__ import annotations
 import math
 import time
 import warnings
+from dataclasses import dataclass, replace
 from types import TracebackType
 from typing import Iterable
 
 import zmq
 
-from microgrid.comm.node import CommError, CommStats, HandshakeTimeout, PeerNode
+from microgrid.comm.node import (
+    NODE_COUNTERS,
+    CommError,
+    CommStats,
+    HandshakeTimeout,
+    PeerNode,
+    StepResult,
+)
 from microgrid.config import CommConfig
 
 # Soft RLIMIT_NOFILE target when the hard limit is unlimited or larger.
@@ -74,6 +92,27 @@ def raise_fd_limit(target: int = FD_LIMIT_TARGET) -> int | None:
     return soft
 
 
+@dataclass(frozen=True)
+class StepReport:
+    """One ``await_step``: every node's barrier, all closed together."""
+
+    step: int
+    barrier_ms: float
+    nodes: dict[int, StepResult]
+
+    @property
+    def status_loss(self) -> int:
+        return sum(r.status_loss for r in self.nodes.values())
+
+    @property
+    def order_loss(self) -> int:
+        return sum(r.order_loss for r in self.nodes.values())
+
+    @property
+    def degraded(self) -> bool:
+        return any(r.degraded for r in self.nodes.values())
+
+
 class PeerNetwork:
     """Builds, owns and tears down one PeerNode per agent id."""
 
@@ -99,9 +138,14 @@ class PeerNetwork:
             for node_id in ids:
                 self.nodes[node_id] = PeerNode(node_id, self.ctx, self.config)
             # ... and only then connect the SUBs.
-            pub_endpoints = [node.pub_endpoint for node in self.nodes.values()]
+            pub_endpoints = {node_id: node.pub_endpoint for node_id, node in self.nodes.items()}
             for node in self.nodes.values():
                 node.connect_peers(pub_endpoints)
+            # One poller over every SUB: a wait wakes on the first arrival
+            # at any node instead of sleeping a fixed time.
+            self._poller = zmq.Poller()
+            for node in self.nodes.values():
+                self._poller.register(node.sub, zmq.POLLIN)
         except Exception:
             self.close()
             raise
@@ -121,12 +165,13 @@ class PeerNetwork:
         return self._ready
 
     def stats(self) -> CommStats:
-        """Snapshot of the network's communication counters."""
-        return CommStats(
-            handshake_ms=self._stats.handshake_ms,
-            handshake_rounds=self._stats.handshake_rounds,
-            handshake_leftovers=sum(n.handshake_leftovers for n in self.nodes.values()),
-        )
+        """Snapshot: the network-wide counters plus every node's, summed."""
+        total = replace(self._stats, barrier_ms=list(self._stats.barrier_ms), latency_ms=[])
+        for node in self.nodes.values():
+            for name in NODE_COUNTERS:
+                setattr(total, name, getattr(total, name) + getattr(node.stats, name))
+            total.latency_ms.extend(node.stats.latency_ms)
+        return total
 
     def unheard(self) -> dict[int, list[int]]:
         """Per node, the peers it has not heard a handshake STATUS from."""
@@ -151,10 +196,6 @@ class PeerNetwork:
         if self._ready:
             return
         interval = self.config.handshake_interval_ms / 1000.0
-        poller = zmq.Poller()
-        for node in self.nodes.values():
-            poller.register(node.sub, zmq.POLLIN)
-
         start = time.perf_counter()
         deadline = start + self.config.handshake_timeout_s
         next_round = start
@@ -176,13 +217,54 @@ class PeerNetwork:
                 self._stats.handshake_rounds = rounds
                 raise HandshakeTimeout(self._timeout_message(unheard, rounds))
             wait_ms = math.ceil(1000.0 * (min(next_round, deadline) - now))
-            poller.poll(max(wait_ms, 0))
+            self._poller.poll(max(wait_ms, 0))
 
         self._stats.handshake_ms = 1000.0 * (time.perf_counter() - start)
         self._stats.handshake_rounds = rounds
         for node in self.nodes.values():
             node.ready = True
         self._ready = True
+
+    def await_step(self, step: int) -> StepReport:
+        """Step barrier: wait until every node holds all of ``step``, then close it.
+
+        Returns within ``step_timeout_s`` whatever happens; a node that is
+        still missing something then closes degraded and the loss is counted
+        (see the module docstring). Steps close in increasing order.
+        """
+        if self._closed:
+            raise CommError("network is closed")
+        if not self._ready:
+            raise CommError("await_step() needs a completed handshake()")
+        if any(step <= node.last_closed_step for node in self.nodes.values()):
+            raise CommError(f"step {step} is already closed")
+
+        start = time.perf_counter()
+        deadline = start + self.config.step_timeout_s
+        for node in self.nodes.values():
+            node.drain(0)
+        waiting = {i for i, node in self.nodes.items() if not node.barrier_state(step).complete}
+        while waiting:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            self._poller.poll(math.ceil(1000.0 * remaining))
+            # Drain every node, finished or not: a SUB left holding data (say,
+            # step + 1 traffic) would make every later poll return at once.
+            arrived = {i for i, node in self.nodes.items() if node.drain(0)}
+            waiting -= {i for i in waiting & arrived if self.nodes[i].barrier_state(step).complete}
+        barrier_ms = 1000.0 * (time.perf_counter() - start)
+
+        report = StepReport(
+            step=step,
+            barrier_ms=barrier_ms,
+            nodes={i: node.close_step(step) for i, node in self.nodes.items()},
+        )
+        self._stats.steps += 1
+        self._stats.barrier_ms.append(barrier_ms)
+        if report.degraded:
+            self._stats.degraded_steps += 1
+        return report
 
     def _timeout_message(self, unheard: dict[int, list[int]], rounds: int) -> str:
         detail = "; ".join(
