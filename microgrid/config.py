@@ -46,6 +46,8 @@ class SimulationConfig:
     battery: BatteryConfig = field(default_factory=BatteryConfig)
     tariff: TariffConfig = field(default_factory=TariffConfig)
     seed: int = 42
+    # CommConfig is defined at the end of this module, hence the lambda.
+    comm: CommConfig = field(default_factory=lambda: CommConfig())
 
     @property
     def step_hours(self) -> float:
@@ -54,3 +56,28 @@ class SimulationConfig:
     @property
     def total_steps(self) -> int:
         return self.steps_per_day * self.num_days
+
+
+# Appended at the end of the file on purpose: Phase 2 edits this module in
+# parallel, and end-of-file additions keep merge conflicts to a minimum.
+@dataclass
+class CommConfig:
+    """ZeroMQ communication layer settings (Phase 3, Architecture 4.3)."""
+
+    # "tcp" (default) or "inproc"; inproc is the fallback when the OS file
+    # descriptor limit is too small for a full tcp mesh. Only the address changes.
+    transport: str = "tcp"
+    bind_host: str = "127.0.0.1"  # local sockets only (Architecture 3)
+    handshake_interval_ms: int = 10
+    handshake_timeout_s: float = 5.0
+    step_timeout_s: float = 2.0
+    request_timeout_s: float = 1.0
+    poll_interval_ms: int = 5
+    # PUB silently drops messages once SNDHWM is reached (zmq default: 1000).
+    # Large but finite: an unlimited HWM (0) lets queues grow without bound.
+    sndhwm: int = 100_000
+    rcvhwm: int = 100_000
+    io_threads: int = 1
+    # Raise RLIMIT_NOFILE before building the mesh; skipped with a warning on
+    # platforms without the ``resource`` module (Windows).
+    raise_fd_limit: bool = True
