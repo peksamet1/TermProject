@@ -12,6 +12,7 @@ import pytest
 
 from experiments.comm_scale import (
     COLUMNS,
+    NEGOTIATION_ROUNDS,
     publish_step,
     active_count,
     main,
@@ -102,9 +103,31 @@ def test_order_stream_is_deterministic_with_exact_active_count():
 def test_fast_subset_is_lossless(num_nodes, transport):
     row = run_one(num_nodes, transport, active_ratio=1.0, steps=FAST_STEPS)
     _assert_clean(row)
-    assert row["requests"] == num_nodes * (num_nodes - 1)  # all-to-all at 1.0
+    pairs = num_nodes * (num_nodes - 1)  # all-to-all at 1.0
+    assert row["requests"] == NEGOTIATION_ROUNDS * pairs
+    # Pooled: one REQ per pair, reused by every later round.
+    assert row["req_opened"] == pairs
+    assert row["req_churn_p50_ms"] is not None
     assert row["broadcasts_per_step"] == 2 * num_nodes
     assert row["step_p50_ms"] is not None and row["step_p50_ms"] > 0
+
+
+@pytest.mark.parametrize("transport", ["tcp", "inproc"])
+def test_per_request_mode_opens_a_req_every_request(transport):
+    row = run_one(3, transport, active_ratio=1.0, steps=2, req_mode="per-request")
+    _assert_clean(row)
+    assert row["requests"] == row["req_opened"] == NEGOTIATION_ROUNDS * 6
+    assert row["req_close_ms"] is not None and row["req_close_ms"] >= 0
+
+
+def test_close_idle_requests_empties_the_pool():
+    with PeerNetwork([0, 1, 2], CommConfig(transport="inproc")) as net:
+        net.negotiation_rounds([(0, 1, "a"), (0, 2, "b")], lambda target, body: body)
+        assert net[0].req_sockets == 2
+        assert net[0].close_idle_requests() == 2
+        assert net[0].req_sockets == 0
+        net.negotiation_rounds([(0, 1, "c")], lambda target, body: body)
+        assert net[0].stats.req_opened == 3  # a fresh REQ, not a pooled one
 
 
 def test_main_writes_csv_and_png(tmp_path):

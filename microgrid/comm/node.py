@@ -29,7 +29,17 @@ runs reached 14343 and then showed up as timeouts at N=10 and as
 in-session observation (macOS 26.6.2 arm64, Python 3.13.1, ad-hoc script
 not in the repo, per-request REQs before pooling); only the 30 s and the
 16384 come from the OS settings (sysctl net.inet.tcp.msl,
-net.inet.ip.portrange). Step 5 re-measures. A pooled REQ still talks to
+net.inet.ip.portrange). Step 5 re-measured it reproducibly with
+``experiments/comm_scale.py --req-mode per-request`` (Darwin 25.6.0 arm64,
+Python 3.13.1, libzmq 4.3.5, tcp, 5 all-to-all rounds, one run per cell,
+each started with 0 connections in TIME_WAIT): per-request REQs left 441
+connections in TIME_WAIT at N=10 and 9800 at N=50 (pooled: 0), with
+create + connect at 0.03-0.06 ms p50 per request. That one isolated run
+had no timeout and no "Can't assign requested address": the port
+exhaustion of step 4 needs back-to-back runs within 30 s and was not
+reproduced. What did show is the timeout margin: at N=50 one all-to-all
+round took 942 ms p50 per-request against 308 ms pooled, with
+request_timeout_s = 1.0. A pooled REQ still talks to
 exactly one REP, so the design constraint holds. A REQ that times out is
 closed, never pooled: it is stuck waiting for a reply it may never get, and
 a late reply must not be read as the answer to the next request. A second
@@ -822,6 +832,22 @@ class PeerNode:
             except Exception:
                 # Last resort: lone surrogates in the message become "?".
                 return default_error_reply(body, exc).encode("utf-8", errors="replace")
+
+    def close_idle_requests(self) -> int:
+        """Close every pooled idle REQ; returns how many were closed.
+
+        Requests in flight are untouched. Calling this after every round
+        brings back the per-request REQ of step 4 (one new connection per
+        request), which is how ``experiments/comm_scale.py --req-mode
+        per-request`` measures what the pool saves.
+        """
+        closed = 0
+        for idle in self._idle_reqs.values():
+            for sock in idle:
+                sock.close(linger=0)
+                closed += 1
+        self._idle_reqs.clear()
+        return closed
 
     @property
     def open_requests(self) -> int:

@@ -417,7 +417,9 @@ class PeerNetwork:
             # every REQ of a round hold its socket slot until the next round, and
             # at N = 50 with everyone asking everyone that round failed with
             # EMFILE (MAX_SOCKETS); one-off in-session observation (macOS,
-            # ad-hoc script not in the repo), to be re-measured in step 5.
+            # ad-hoc script not in the repo). Step 5 did not re-measure this
+            # one: its experiment always runs with this poll, and N = 50
+            # per-request rounds with it ended with no error (see node.py).
             self._rep_poller.poll(0)
 
         return [

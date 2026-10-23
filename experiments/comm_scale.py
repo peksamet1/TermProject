@@ -18,9 +18,20 @@ source, mock or real, can put more on the wire. ``0.5`` is a typical load.
 step's global send order, i.e. the (random) activation order. It is never a
 per-node counter (see ``PeerNode._check_outbound``).
 
-After the steps, one negotiation drive (``negotiation_rounds``) runs:
-every active node asks every other active node, which at ``1.0`` is the
-all-to-all worst case of N (N - 1) requests.
+After the steps, the negotiation drive (``negotiation_rounds``) runs
+``--negotiation-rounds`` times with the same requests: every active node
+asks every other active node, which at ``1.0`` is the all-to-all worst case
+of N (N - 1) requests per round. More than one round is what makes the REQ
+pool visible: from round 2 on a pair reuses its REQ, so ``req_opened``
+falls below ``requests``.
+
+``--req-mode per-request`` re-measures what step 4 recorded only as a
+one-off observation (plan step 4, item 6): it empties every REQ pool after
+each round, which brings back one new REQ, and over tcp one new connection,
+per request. ``req_churn_*`` is the create + connect cost per request,
+``req_close_ms`` the close cost per REQ, and ``time_wait_delta`` how many tcp
+connections the negotiation left in TIME_WAIT (counted with netstat / ss,
+system-wide, so other traffic on the machine adds to it).
 
 Step time (``step_p50_ms``) is publish + barrier: from the first publish of a
 step until every node has closed it. ``barrier_p50_ms`` is the barrier part
@@ -43,6 +54,7 @@ import csv
 import math
 import os
 import platform
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -66,17 +78,21 @@ RESULTS_DIR = Path("results")
 CSV_PATH = RESULTS_DIR / "comm_scale.csv"
 PNG_PATH = RESULTS_DIR / "comm_scale.png"
 BASELINE = "baseline"
+NEGOTIATION_ROUNDS = 5
+REQ_MODES = ("pooled", "per-request")
 
 COLUMNS = (
     "variant", "num_nodes", "transport", "active_ratio", "steps",
-    "io_threads", "hwm",
+    "io_threads", "hwm", "req_mode", "negotiation_rounds",
     "broadcasts_per_step", "deliveries_per_step",
     "status_loss", "order_loss", "loss", "degraded_steps", "status_loss_steps",
     "late", "protocol_errors", "inconsistent_steps",
     "requests", "replies", "timeouts", "req_opened",
     "latency_p50_ms", "latency_p95_ms", "rtt_p50_ms", "rtt_p95_ms",
     "step_p50_ms", "step_p95_ms", "barrier_p50_ms", "barrier_p95_ms",
-    "negotiation_ms", "handshake_ms", "open_fds", "fd_limit", "wall_s",
+    "req_churn_p50_ms", "req_churn_p95_ms", "req_close_ms",
+    "time_wait_before", "time_wait_delta",
+    "negotiation_p50_ms", "handshake_ms", "open_fds", "fd_limit", "wall_s",
     "error", "platform", "python", "pyzmq", "libzmq", "seed",
 )  # fmt: skip
 
@@ -177,6 +193,23 @@ def _fd_limit() -> int | None:
     return resource.getrlimit(resource.RLIMIT_NOFILE)[0]
 
 
+def _time_wait() -> int | None:
+    """System-wide tcp connections in TIME_WAIT; ``None`` where it cannot be read."""
+    if sys.platform == "darwin":
+        cmd = ["netstat", "-an", "-p", "tcp"]
+    elif sys.platform.startswith("linux"):
+        cmd = ["ss", "-tan", "state", "time-wait"]
+    else:
+        return None
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if sys.platform == "darwin":
+        return sum("TIME_WAIT" in line for line in out.splitlines())
+    return max(len(out.splitlines()) - 1, 0)  # ss prints one header line
+
+
 def _environment() -> dict[str, str]:
     return {
         "platform": f"{platform.system()} {platform.release()} {platform.machine()}",
@@ -195,8 +228,12 @@ def run_one(
     io_threads: int = 1,
     hwm: int | None = None,
     variant: str = BASELINE,
+    req_mode: str = "pooled",
+    negotiation_rounds: int = NEGOTIATION_ROUNDS,
 ) -> dict:
     """One cell of the matrix; returns its CSV row. Never raises on comm failure."""
+    if req_mode not in REQ_MODES:
+        raise ValueError(f"unknown req_mode {req_mode!r} (expected one of {REQ_MODES})")
     base = CommConfig()
     hwm = base.sndhwm if hwm is None else hwm
     config = CommConfig(transport=transport, io_threads=io_threads, sndhwm=hwm, rcvhwm=hwm)
@@ -210,6 +247,8 @@ def run_one(
         steps=steps,
         io_threads=io_threads,
         hwm=hwm,
+        req_mode=req_mode,
+        negotiation_rounds=negotiation_rounds,
         broadcasts_per_step=num_nodes + k,
         deliveries_per_step=(num_nodes + k) * (num_nodes - 1),
         seed=seed,
@@ -233,10 +272,25 @@ def run_one(
                     inconsistent += 1
             active = [a.node_id for a in stream[-1] if a.side is not None] if stream else []
             requests = [(a, b, f"{a}->{b}") for a in active for b in active if a != b]
-            t0 = time.perf_counter()
-            net.negotiation_rounds(requests, lambda target, body: body)
-            row["negotiation_ms"] = 1000.0 * (time.perf_counter() - t0)
+            negotiation_ms: list[float] = []
+            close_ms = 0.0
+            closed = 0
+            row["time_wait_before"] = _time_wait()
+            for _ in range(negotiation_rounds):
+                t0 = time.perf_counter()
+                net.negotiation_rounds(requests, lambda target, body: body)
+                negotiation_ms.append(1000.0 * (time.perf_counter() - t0))
+                if req_mode == "per-request":
+                    t0 = time.perf_counter()
+                    closed += sum(node.close_idle_requests() for node in net.nodes.values())
+                    close_ms += 1000.0 * (time.perf_counter() - t0)
             row["open_fds"] = _open_fds()
+            time_wait_after = _time_wait()
+            if row["time_wait_before"] is not None and time_wait_after is not None:
+                row["time_wait_delta"] = time_wait_after - row["time_wait_before"]
+            row["negotiation_p50_ms"] = percentile(negotiation_ms, 50)
+            if closed:
+                row["req_close_ms"] = close_ms / closed
             stats = net.stats()
     except (zmq.ZMQError, OSError, RuntimeError) as exc:
         row["error"] = f"{type(exc).__name__}: {exc}"
@@ -256,7 +310,8 @@ def _fill_from_stats(row: dict, stats: CommStats) -> None:
         "status_loss", "order_loss", "degraded_steps", "status_loss_steps", "late",
         "protocol_errors", "requests", "replies", "timeouts", "req_opened",
         "latency_p50_ms", "latency_p95_ms", "rtt_p50_ms", "rtt_p95_ms",
-        "barrier_p50_ms", "barrier_p95_ms", "handshake_ms",
+        "barrier_p50_ms", "barrier_p95_ms", "req_churn_p50_ms", "req_churn_p95_ms",
+        "handshake_ms",
     ):  # fmt: skip
         row[name] = summary[name]
     row["loss"] = stats.status_loss + stats.order_loss
@@ -358,6 +413,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--io-threads", type=int, default=1)
     parser.add_argument("--hwm", type=int, default=None, help="SNDHWM and RCVHWM")
     parser.add_argument("--variant", default=BASELINE, help="label of a tuning attempt")
+    parser.add_argument("--req-mode", default="pooled", choices=REQ_MODES)
+    parser.add_argument("--negotiation-rounds", type=int, default=NEGOTIATION_ROUNDS)
     parser.add_argument("--append", action="store_true", help="add rows to an existing CSV")
     parser.add_argument("--csv", type=Path, default=CSV_PATH)
     parser.add_argument("--png", type=Path, default=PNG_PATH)
@@ -371,6 +428,7 @@ def main(argv: list[str] | None = None) -> int:
                 row = run_one(
                     n, transport, ratio, args.steps, args.seed,
                     io_threads=args.io_threads, hwm=args.hwm, variant=args.variant,
+                    req_mode=args.req_mode, negotiation_rounds=args.negotiation_rounds,
                 )  # fmt: skip
                 rows.append(row)
                 print(
@@ -381,7 +439,10 @@ def main(argv: list[str] | None = None) -> int:
                         else f"loss={row['loss']} timeouts={row['timeouts']} "
                         f"degraded={row['degraded_steps']} late={row['late']} "
                         f"step p50={row['step_p50_ms']:.2f} ms p95={row['step_p95_ms']:.2f} ms "
-                        f"rtt p50={_fmt(row['rtt_p50_ms'])} ms"
+                        f"rtt p50={_fmt(row['rtt_p50_ms'])} ms "
+                        f"req_opened={row['req_opened']}/{row['requests']} "
+                        f"churn p50={_fmt(row['req_churn_p50_ms'])} ms "
+                        f"time_wait_delta={_fmt(row['time_wait_delta'])}"
                     ),
                     flush=True,
                 )
