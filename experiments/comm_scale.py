@@ -30,8 +30,14 @@ one-off observation (plan step 4, item 6): it empties every REQ pool after
 each round, which brings back one new REQ, and over tcp one new connection,
 per request. ``req_churn_*`` is the create + connect cost per request,
 ``req_close_ms`` the close cost per REQ, and ``time_wait_delta`` how many tcp
-connections the negotiation left in TIME_WAIT (counted with netstat / ss,
-system-wide, so other traffic on the machine adds to it).
+connections the negotiation left in TIME_WAIT. It is counted while the
+network is still open, once the count has settled (teardown is
+asynchronous), with netstat / ss, system-wide, so other traffic on the
+machine adds to it and connections expiring after 30 s subtract from it.
+Pooled REQs are only closed at teardown and so never show up here: at
+close they cost about one TIME_WAIT per pair that talked, on top of the
+mesh's N (N - 1). Start a run with 0 connections in TIME_WAIT
+(``time_wait_before``) for a clean count.
 
 Step time (``step_p50_ms``) is publish + barrier: from the first publish of a
 step until every node has closed it. ``barrier_p50_ms`` is the barrier part
@@ -64,7 +70,13 @@ import numpy as np
 import zmq
 
 from microgrid.comm.network import PeerNetwork
-from microgrid.comm.node import CommStats, percentile
+from microgrid.comm.node import (
+    BUYING_STATE,
+    IDLE_STATE,
+    SELLING_STATE,
+    CommStats,
+    percentile,
+)
 from microgrid.comm.protocol import make_order_message, make_status_message
 from microgrid.config import CommConfig, TariffConfig
 from microgrid.market.base import Order, OrderSide
@@ -149,11 +161,11 @@ def publish_step(net: PeerNetwork, step: int, actions: list[NodeAction]) -> None
     for action in actions:
         node = net[action.node_id]
         if action.side is None:
-            state, residual = "IDLE", 0.0
+            state, residual = IDLE_STATE, 0.0
         elif action.side is OrderSide.SELL:
-            state, residual = "SELLING", action.quantity_kwh
+            state, residual = SELLING_STATE, action.quantity_kwh
         else:
-            state, residual = "BUYING", -action.quantity_kwh
+            state, residual = BUYING_STATE, -action.quantity_kwh
         node.publish_status(
             make_status_message(
                 agent_id=action.node_id,
@@ -208,6 +220,23 @@ def _time_wait() -> int | None:
     if sys.platform == "darwin":
         return sum("TIME_WAIT" in line for line in out.splitlines())
     return max(len(out.splitlines()) - 1, 0)  # ss prints one header line
+
+
+def _settled_time_wait(interval_s: float = 0.5, max_reads: int = 20) -> int | None:
+    """``_time_wait`` once two reads ``interval_s`` apart agree.
+
+    Closed sockets reach TIME_WAIT asynchronously (libzmq's I/O thread, then
+    the kernel), so an immediate count misses the last round's closes and
+    is only a lower bound. Gives up after ``max_reads`` and returns the last.
+    """
+    prev = _time_wait()
+    for _ in range(max_reads):
+        time.sleep(interval_s)
+        cur = _time_wait()
+        if cur == prev:
+            return cur
+        prev = cur
+    return prev
 
 
 def _environment() -> dict[str, str]:
@@ -285,7 +314,12 @@ def run_one(
                     closed += sum(node.close_idle_requests() for node in net.nodes.values())
                     close_ms += 1000.0 * (time.perf_counter() - t0)
             row["open_fds"] = _open_fds()
-            time_wait_after = _time_wait()
+            # Only per-request mode closes REQs here; pooled ones close at
+            # teardown, so there is nothing to wait for.
+            if req_mode == "per-request" and row["time_wait_before"] is not None:
+                time_wait_after = _settled_time_wait()
+            else:
+                time_wait_after = _time_wait()
             if row["time_wait_before"] is not None and time_wait_after is not None:
                 row["time_wait_delta"] = time_wait_after - row["time_wait_before"]
             row["negotiation_p50_ms"] = percentile(negotiation_ms, 50)

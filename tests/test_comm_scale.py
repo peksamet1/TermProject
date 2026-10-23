@@ -7,6 +7,7 @@ nobody runs it.
 """
 
 import csv
+import dataclasses
 
 import pytest
 
@@ -20,7 +21,16 @@ from experiments.comm_scale import (
     run_one,
 )
 from microgrid.comm.network import PeerNetwork
-from microgrid.comm.node import NODE_COUNTERS, NODE_SAMPLES, CommStats, percentile
+from microgrid.agents.household import HouseholdState
+from microgrid.comm.node import (
+    BUYING_STATE,
+    IDLE_STATE,
+    NODE_COUNTERS,
+    NODE_SAMPLES,
+    SELLING_STATE,
+    CommStats,
+    percentile,
+)
 from microgrid.config import CommConfig
 
 FAST_STEPS = 20
@@ -78,12 +88,40 @@ def test_network_stats_sum_the_node_counters():
             assert sorted(getattr(total, name)) == sorted(
                 x for n in net.nodes.values() for x in getattr(n.stats, name)
             )
+        # The same totals from first principles, not from the tuples above:
+        # 3 nodes x 5 steps x 2 peers, every node active at ratio 1.0.
+        assert total.status_expected == total.status_received == 3 * 5 * 2
+        assert total.order_expected == total.order_received == 3 * 5 * 2
+        assert (total.requests, total.replies, total.served, total.timeouts) == (2, 2, 2, 0)
+        assert total.req_opened == 2
+        assert len(total.rtt_ms) == len(total.req_churn_ms) == 2
+        assert len(total.latency_ms) == 3 * 5 * 2 * 2  # STATUS + ORDER per peer delivery
         # One node alone: its own counters, as recorded.
         node = net[1]
         assert node.stats.status_expected == 5 * 2  # 2 peers x 5 steps
         assert node.stats.served == 2
         assert total.steps == 5 and len(total.barrier_ms) == 5
         assert total.percentile_of("rtt_ms", 50) == percentile(total.rtt_ms, 50)
+
+
+def test_every_commstats_field_is_aggregated():
+    # A field a node fills but that is missing from NODE_COUNTERS /
+    # NODE_SAMPLES would be silently dropped by PeerNetwork.stats(). Fields
+    # the network fills itself are listed here by hand, on purpose.
+    network_fields = {
+        "handshake_ms", "handshake_rounds", "steps", "degraded_steps",
+        "status_loss_steps", "barrier_ms",
+    }  # fmt: skip
+    node_fields = set(NODE_COUNTERS) | set(NODE_SAMPLES)
+    assert not node_fields & network_fields
+    assert {f.name for f in dataclasses.fields(CommStats)} == node_fields | network_fields
+
+
+def test_wire_states_match_household_state():
+    # The experiment sends STATUS without Mesa, through these constants; the
+    # barrier's ORDER expectation hinges on IDLE_STATE being the real value.
+    assert {IDLE_STATE, SELLING_STATE, BUYING_STATE} == {s.value for s in HouseholdState}
+    assert IDLE_STATE == HouseholdState.IDLE.value
 
 
 def test_order_stream_is_deterministic_with_exact_active_count():

@@ -32,14 +32,19 @@ not in the repo, per-request REQs before pooling); only the 30 s and the
 net.inet.ip.portrange). Step 5 re-measured it reproducibly with
 ``experiments/comm_scale.py --req-mode per-request`` (Darwin 25.6.0 arm64,
 Python 3.13.1, libzmq 4.3.5, tcp, 5 all-to-all rounds, one run per cell,
-each started with 0 connections in TIME_WAIT): per-request REQs left 441
-connections in TIME_WAIT at N=10 and 9800 at N=50 (pooled: 0), with
-create + connect at 0.03-0.06 ms p50 per request. That one isolated run
-had no timeout and no "Can't assign requested address": the port
-exhaustion of step 4 needs back-to-back runs within 30 s and was not
-reproduced. What did show is the timeout margin: at N=50 one all-to-all
-round took 942 ms p50 per-request against 308 ms pooled, with
-request_timeout_s = 1.0. A pooled REQ still talks to
+every cell, pooled and per-request, started with 0 connections in
+TIME_WAIT). Counted while the network was still open, after the count
+settled: per-request REQs left exactly one connection in TIME_WAIT per
+request (450 at N=10, 12250 at N=50), pooled ones none yet, since they only
+close at teardown. At teardown pooled REQs cost about one TIME_WAIT per
+pair that talked, on top of the mesh's N (N - 1): one ad-hoc run (script not
+in the repo) measured +109 over the mesh at N=10 (90 pairs) and +2141 at
+N=50 (2450 pairs), system-wide counts, so noisy. Create + connect cost
+0.03-0.06 ms p50 per request. No run had a timeout or "Can't assign
+requested address": the port exhaustion of step 4 needs back-to-back runs
+within 30 s and was not reproduced. What did show is the timeout margin:
+at N=50 one all-to-all round took 901 ms p50 per-request against 283 ms
+pooled, with request_timeout_s = 1.0. A pooled REQ still talks to
 exactly one REP, so the design constraint holds. A REQ that times out is
 closed, never pooled: it is stuck waiting for a reply it may never get, and
 a late reply must not be read as the answer to the next request. A second
@@ -109,6 +114,12 @@ HANDSHAKE_STEP = -1
 # Wire value of HouseholdState.IDLE. A STATUS in any other state commits its
 # sender to exactly one ORDER in the same step (Architecture 4.3).
 IDLE_STATE = "IDLE"
+# The other two wire states. The comm layer only tests for IDLE; these exist
+# so that code sending STATUS without Mesa (experiments/comm_scale.py) does
+# not spell them by hand. tests/test_comm_scale.py pins all three to
+# HouseholdState.
+SELLING_STATE = "SELLING"
+BUYING_STATE = "BUYING"
 
 # Start of the reply a target sends when its handler raised. The body is
 # opaque in Phase 3, so this is only the default; Phase 4 passes an
