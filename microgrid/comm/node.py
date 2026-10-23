@@ -111,6 +111,13 @@ def is_error_reply(reply: str | None) -> bool:
     return reply is not None and reply.startswith(ERROR_REPLY_PREFIX)
 
 
+def _encode_reply(reply: object, source: str) -> bytes:
+    # Raises for a non-str or a str UTF-8 cannot encode (a lone surrogate).
+    if not isinstance(reply, str):
+        raise TypeError(f"{source} returned {type(reply).__name__}, not str")
+    return reply.encode("utf-8")
+
+
 def expected_per_step(num_nodes: int) -> int:
     """STATUSes a node holds once a step's barrier is complete.
 
@@ -734,20 +741,33 @@ class PeerNode:
                 frames = self.rep.recv_multipart(zmq.NOBLOCK)
             except zmq.Again:
                 return count
-            try:
-                reply = handler(frames[-1].decode("utf-8"))
-                if not isinstance(reply, str):
-                    raise TypeError(f"handler returned {type(reply).__name__}, not str")
-            except Exception as exc:
-                self.stats.handler_errors += 1
-                body = frames[-1].decode("utf-8", errors="replace")
-                try:
-                    reply = error_reply(body, exc)
-                except Exception:
-                    reply = default_error_reply(body, exc)
-            self.rep.send(reply.encode("utf-8"))
+            self.rep.send(self._reply_payload(frames[-1], handler, error_reply))
             self.stats.served += 1
             count += 1
+
+    def _reply_payload(
+        self,
+        raw: bytes,
+        handler: Callable[[str], str],
+        error_reply: Callable[[str, Exception], str],
+    ) -> bytes:
+        """The reply to one request, as bytes; never raises.
+
+        Everything between the REP's recv and its send is guarded, encoding
+        included: an exception escaping there would leave the REP stuck in
+        its "must send" state, and every later request to this node would
+        time out for the rest of the run.
+        """
+        try:
+            return _encode_reply(handler(raw.decode("utf-8")), "handler")
+        except Exception as exc:
+            self.stats.handler_errors += 1
+            body = raw.decode("utf-8", errors="replace")
+            try:
+                return _encode_reply(error_reply(body, exc), "error_reply")
+            except Exception:
+                # Last resort: lone surrogates in the message become "?".
+                return default_error_reply(body, exc).encode("utf-8", errors="replace")
 
     @property
     def open_requests(self) -> int:

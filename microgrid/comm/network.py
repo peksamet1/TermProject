@@ -350,69 +350,70 @@ class PeerNetwork:
             if requester not in self.nodes or target not in self.nodes:
                 raise ValueError(f"unknown node in request {requester} -> {target}")
 
-        # Round 1: every requester sends; nothing waits yet.
         pending: list[PendingRequest] = []
         try:
+            # Round 1: every requester sends; nothing waits yet.
             for requester, target, body in triples:
                 pending.append(self.nodes[requester].send_request(target, body))
-        except Exception:
+            deadline = time.perf_counter() + timeout_s
+
+            def serve(node: PeerNode) -> int:
+                return node.serve_requests(partial(handler, node.node_id), 0, error_reply)
+
+            # Round 2: every target answers everything addressed to it. The
+            # network knows how many that is; a target cannot tell "nothing
+            # more is coming" from "not arrived yet".
+            due: dict[int, int] = {}
             for p in pending:
-                self.nodes[p.node_id].collect_reply(p, 0)
-            raise
-        deadline = time.perf_counter() + timeout_s
+                due[p.peer_id] = due.get(p.peer_id, 0) + 1
+            while due:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                for sock, _ in self._rep_poller.poll(math.ceil(1000.0 * remaining)):
+                    # Drain even a REP that owes nothing: an earlier round's
+                    # leftover would otherwise keep every poll returning at once.
+                    node = self._node_of_rep[sock]
+                    left = due.get(node.node_id, 0) - serve(node)
+                    if left <= 0:
+                        due.pop(node.node_id, None)
+                    else:
+                        due[node.node_id] = left
 
-        def serve(node: PeerNode) -> int:
-            return node.serve_requests(partial(handler, node.node_id), 0, error_reply)
-
-        # Round 2: every target answers everything addressed to it. The
-        # network knows how many that is; a target cannot tell "nothing
-        # more is coming" from "not arrived yet".
-        due: dict[int, int] = {}
-        for p in pending:
-            due[p.peer_id] = due.get(p.peer_id, 0) + 1
-        while due:
-            remaining = deadline - time.perf_counter()
-            if remaining <= 0:
-                break
-            for sock, _ in self._rep_poller.poll(math.ceil(1000.0 * remaining)):
-                # Drain even a REP that owes nothing: an earlier round's
-                # leftover would otherwise keep every poll returning at once.
-                node = self._node_of_rep[sock]
-                left = due.get(node.node_id, 0) - serve(node)
-                if left <= 0:
-                    due.pop(node.node_id, None)
-                else:
-                    due[node.node_id] = left
-
-        # Round 3: every requester collects; one poll over every open REQ.
-        # The count of round 2 can be fooled: a request that timed out in an
-        # earlier round may reach its target only now and be counted in place
-        # of one of this round's, which is then still queued. The REPs of
-        # targets with a reply outstanding are therefore polled here as well.
-        waiting = {p.socket: p for p in pending if p.socket is not None}
-        while waiting:
-            remaining = deadline - time.perf_counter()
-            if remaining <= 0:
-                break
-            poller = zmq.Poller()
-            for sock, p in waiting.items():
-                poller.register(sock, zmq.POLLIN)
-                poller.register(self.nodes[p.peer_id].rep, zmq.POLLIN)
-            for sock, _ in poller.poll(math.ceil(1000.0 * remaining)):
-                if sock in self._node_of_rep:
-                    serve(self._node_of_rep[sock])
-                else:
-                    p = waiting.pop(sock)
+            # Round 3: every requester collects; one poll over every open REQ.
+            # The count of round 2 can be fooled: a request that timed out in an
+            # earlier round may reach its target only now and be counted in place
+            # of one of this round's, which is then still queued. The REPs of
+            # targets with a reply outstanding are therefore polled here as well.
+            waiting = {p.socket: p for p in pending if p.socket is not None}
+            while waiting:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                poller = zmq.Poller()
+                for sock, p in waiting.items():
+                    poller.register(sock, zmq.POLLIN)
+                    poller.register(self.nodes[p.peer_id].rep, zmq.POLLIN)
+                for sock, _ in poller.poll(math.ceil(1000.0 * remaining)):
+                    if sock in self._node_of_rep:
+                        serve(self._node_of_rep[sock])
+                    else:
+                        p = waiting.pop(sock)
+                        self.nodes[p.node_id].collect_reply(p, 0)
+        finally:
+            # Whatever ended the rounds (deadline, or an exception from a
+            # send or a REP), no request stays in flight: an unanswered one
+            # is finished as a timeout and its REQ closed.
+            for p in pending:
+                if not p.done:
                     self.nodes[p.node_id].collect_reply(p, 0)
-        for p in waiting.values():
-            self.nodes[p.node_id].collect_reply(p, 0)
-        # A closed (timed-out) REQ is only reaped once the target's REP has
-        # processed the pipe teardown, and a REP processes commands only when
-        # it is touched. Before REQs were pooled, skipping this poll made
-        # every REQ of a round hold its socket slot until the next round, and
-        # at N = 50 with everyone asking everyone that round failed with
-        # EMFILE (MAX_SOCKETS).
-        self._rep_poller.poll(0)
+            # A closed (timed-out) REQ is only reaped once the target's REP has
+            # processed the pipe teardown, and a REP processes commands only when
+            # it is touched. Before REQs were pooled, skipping this poll made
+            # every REQ of a round hold its socket slot until the next round, and
+            # at N = 50 with everyone asking everyone that round failed with
+            # EMFILE (MAX_SOCKETS).
+            self._rep_poller.poll(0)
 
         return [
             RequestResult(p.node_id, p.peer_id, p.body, p.reply, p.rtt_ms) for p in pending

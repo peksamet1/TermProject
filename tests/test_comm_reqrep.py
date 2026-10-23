@@ -140,6 +140,49 @@ def test_custom_error_reply_and_non_str_reply(comm_config):
         assert net.stats().handler_errors == 1
 
 
+@pytest.mark.parametrize(
+    "handler, error_reply, expected",
+    [
+        # A str UTF-8 cannot encode: fails only at the send, after the handler.
+        (lambda target_id, body: "\ud800", lambda body, exc: f"rejected {body}", "rejected x"),
+        # The error reply itself is unusable: falls back to the default one.
+        (lambda target_id, body: 42, lambda body, exc: b"not a str", ERROR_REPLY_PREFIX + "TypeError"),
+        (lambda target_id, body: "\ud800", lambda body, exc: "\ud800",
+         ERROR_REPLY_PREFIX + "UnicodeEncodeError"),
+    ],
+)
+def test_unsendable_reply_never_leaves_the_rep_stuck(comm_config, handler, error_reply, expected):
+    # An exception between REP recv and send would leave the REP unable to
+    # read again: every later request to node 1 would time out.
+    with PeerNetwork([0, 1], comm_config) as net:
+        [result] = net.negotiation_rounds([(0, 1, "x")], handler, error_reply=error_reply)
+        assert result.reply is not None and result.reply.startswith(expected)
+        assert net[1].stats.handler_errors == 1
+        [result] = net.negotiation_rounds([(0, 1, "next")], _echo)
+        assert result.reply == "1:next"
+        assert net.stats().timeouts == 0
+
+
+class _Abort(BaseException):
+    """Not an Exception: escapes the handler guard, like KeyboardInterrupt."""
+
+
+def test_exception_during_rounds_leaves_no_request_in_flight(comm_config):
+    with PeerNetwork([0, 1, 2], comm_config) as net:
+        # Round 1: the second send raises after the first one went out.
+        with pytest.raises(TypeError):
+            net.negotiation_rounds([(0, 1, "ok"), (0, 2, b"bytes")], _echo)
+        assert all(node.open_requests == 0 for node in net.nodes.values())
+
+        # Round 2: an exception out of a target's handler.
+        def handler(target_id: int, body: str) -> str:
+            raise _Abort
+
+        with pytest.raises(_Abort):
+            net.negotiation_rounds([(0, 2, "a"), (1, 2, "b")], handler)
+        assert all(node.open_requests == 0 for node in net.nodes.values())
+
+
 def test_two_requests_to_one_target_are_both_answered(comm_config):
     with PeerNetwork([0, 1, 2], comm_config) as net:
         requests = [(0, 2, "a"), (1, 2, "b"), (0, 2, "c")]  # node 0 asks twice
