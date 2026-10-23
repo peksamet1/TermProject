@@ -25,7 +25,11 @@ REQ is a new TCP connection, and each one closed parks an ephemeral port in
 TIME_WAIT for 2 x MSL (30 s on macOS, 16384 ports). One N=3 + N=10 run of
 20 everyone-asks-everyone rounds left 2112 ports in TIME_WAIT; back-to-back
 runs reached 14343 and then showed up as timeouts at N=10 and as
-"Can't assign requested address" at N=50. A pooled REQ still talks to
+"Can't assign requested address" at N=50. These counts are a one-off
+in-session observation (macOS 26.6.2 arm64, Python 3.13.1, ad-hoc script
+not in the repo, per-request REQs before pooling); only the 30 s and the
+16384 come from the OS settings (sysctl net.inet.tcp.msl,
+net.inet.ip.portrange). Step 5 re-measures. A pooled REQ still talks to
 exactly one REP, so the design constraint holds. A REQ that times out is
 closed, never pooled: it is stuck waiting for a reply it may never get, and
 a late reply must not be read as the answer to the next request. A second

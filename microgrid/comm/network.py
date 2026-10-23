@@ -412,7 +412,8 @@ class PeerNetwork:
             # it is touched. Before REQs were pooled, skipping this poll made
             # every REQ of a round hold its socket slot until the next round, and
             # at N = 50 with everyone asking everyone that round failed with
-            # EMFILE (MAX_SOCKETS).
+            # EMFILE (MAX_SOCKETS); one-off in-session observation (macOS,
+            # ad-hoc script not in the repo), to be re-measured in step 5.
             self._rep_poller.poll(0)
 
         return [
