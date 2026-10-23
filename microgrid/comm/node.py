@@ -5,8 +5,32 @@ Sockets are split by pattern (PSD 5.1, only PUB-SUB and REQ-REP):
 - SUB: connected to every other node's PUB. A SUB never hears its own PUB,
   so ``publish`` also delivers the node's own message straight into its own
   inbox (see ``expected_per_step``).
-- REP: answers requests from peers. REQ sockets are per request and come
-  in a later step.
+- REP: answers requests from peers (``serve_requests``).
+- REQ: connected to one target's REP *only*, kept in a per-target pool of
+  idle sockets and reused for the next request to that target.
+
+Request / reply (step 4) is mechanism, not semantics: an opaque string body
+goes to one peer and an opaque string (or ``None`` on timeout) comes back;
+TRADE / NACK fill it in Phase 4. It is split into ``send_request`` and
+``collect_reply`` because in one thread nobody serves the target's REP while
+a requester waits: a blocking ``REQ.recv`` deadlocks the process
+(Architecture 4.3). ``PeerNetwork.negotiation_rounds`` therefore runs three
+rounds: every requester sends, every target drains its REP, every requester
+collects. ``request`` is send + collect in one call and only gets an answer
+when the target is served while it waits; every wait is a bounded poll.
+
+Why REQs are pooled instead of opened and closed per request (the plan's
+fallback, step 4 item 6, taken because of a measurement): over tcp every new
+REQ is a new TCP connection, and each one closed parks an ephemeral port in
+TIME_WAIT for 2 x MSL (30 s on macOS, 16384 ports). One N=3 + N=10 run of
+20 everyone-asks-everyone rounds left 2112 ports in TIME_WAIT; back-to-back
+runs reached 14343 and then showed up as timeouts at N=10 and as
+"Can't assign requested address" at N=50. A pooled REQ still talks to
+exactly one REP, so the design constraint holds. A REQ that times out is
+closed, never pooled: it is stuck waiting for a reply it may never get, and
+a late reply must not be read as the answer to the next request. A second
+concurrent request to the same target opens another REQ, which joins the
+pool once answered.
 
 Readiness handshake (step 2): a STATUS with ``step == HANDSHAKE_STEP`` only
 signals "my PUB reaches you". It is recorded in ``seen_peers`` and never
@@ -38,9 +62,10 @@ messages; a lingering socket is what makes ``ctx.term()`` hang a test run.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Callable, Mapping
 
 import zmq
 
@@ -70,6 +95,20 @@ HANDSHAKE_STEP = -1
 # Wire value of HouseholdState.IDLE. A STATUS in any other state commits its
 # sender to exactly one ORDER in the same step (Architecture 4.3).
 IDLE_STATE = "IDLE"
+
+# Start of the reply a target sends when its handler raised. The body is
+# opaque in Phase 3, so this is only the default; Phase 4 passes an
+# ``error_reply`` that builds a NACK instead.
+ERROR_REPLY_PREFIX = "ERROR "
+
+
+def default_error_reply(body: str, exc: Exception) -> str:
+    """Reply for a request whose handler raised: never leave it unanswered."""
+    return f"{ERROR_REPLY_PREFIX}{type(exc).__name__}: {exc}"
+
+
+def is_error_reply(reply: str | None) -> bool:
+    return reply is not None and reply.startswith(ERROR_REPLY_PREFIX)
 
 
 def expected_per_step(num_nodes: int) -> int:
@@ -124,6 +163,24 @@ class CommStats:
     # process this is mostly time spent waiting for the loop to drain, which
     # is why it is reported next to barrier_ms (Architecture 4.3).
     latency_ms: list[float] = field(default_factory=list)
+    # REQ-REP, requester side: sent, answered, and given up on after the
+    # timeout (the reply, if it comes, is dropped with the closed REQ).
+    requests: int = 0
+    replies: int = 0
+    timeouts: int = 0
+    # REQ-REP, target side: requests answered, and how many of those got the
+    # error reply because the handler raised.
+    served: int = 0
+    handler_errors: int = 0
+    # Send to reply receipt, time.perf_counter(). Under negotiation_rounds it
+    # includes waiting for the other rounds, like latency_ms does.
+    rtt_ms: list[float] = field(default_factory=list)
+    # REQ sockets created; with the pool this stays far below ``requests``.
+    req_opened: int = 0
+    # Socket churn of one request: create + connect and close of a REQ it
+    # needed; only the pool lookup when a pooled REQ was reused and returned
+    # (plan step 4, item 6).
+    req_churn_ms: list[float] = field(default_factory=list)
 
     @property
     def status_loss(self) -> int:
@@ -143,7 +200,30 @@ NODE_COUNTERS = (
     "order_received",
     "late",
     "protocol_errors",
+    "requests",
+    "replies",
+    "timeouts",
+    "served",
+    "handler_errors",
+    "req_opened",
 )
+# CommStats sample lists a node fills itself; PeerNetwork.stats() concatenates them.
+NODE_SAMPLES = ("latency_ms", "rtt_ms", "req_churn_ms")
+
+
+@dataclass(eq=False)
+class PendingRequest:
+    """One request in flight; its REQ is pooled or closed when it finishes."""
+
+    node_id: int
+    peer_id: int
+    body: str
+    socket: zmq.Socket | None
+    sent_at: float  # time.perf_counter()
+    churn_ms: float  # create + connect, or the pool lookup; close is added on finish
+    reply: str | None = None
+    rtt_ms: float | None = None
+    done: bool = False
 
 
 @dataclass(frozen=True)
@@ -202,7 +282,12 @@ class PeerNode:
             )
         self.node_id = node_id
         self.config = config
+        self._ctx = ctx  # per-request REQ sockets are created on it
         self._closed = False
+        # Set before any socket: close() runs on a failed constructor too.
+        self._pending: set[PendingRequest] = set()
+        # Idle REQs per target id, each connected to that target's REP only.
+        self._idle_reqs: dict[int, list[zmq.Socket]] = {}
         self.pub: zmq.Socket | None = None
         self.sub: zmq.Socket | None = None
         self.rep: zmq.Socket | None = None
@@ -219,8 +304,12 @@ class PeerNode:
             raise
         self.connected_peers: list[str] = []
         self.peer_ids: set[int] = set()
+        # REP endpoint per node id, own included: what a REQ connects to.
+        self.rep_endpoints: dict[int, str] = {node_id: self.rep_endpoint}
         self._poller = zmq.Poller()
         self._poller.register(self.sub, zmq.POLLIN)
+        self._rep_poller = zmq.Poller()
+        self._rep_poller.register(self.rep, zmq.POLLIN)
         # Readiness handshake state: ids of peers whose PUB reached this SUB.
         self.seen_peers: set[int] = set()
         self.ready = False
@@ -250,14 +339,21 @@ class PeerNode:
         port = sock.bind_to_random_port(base)
         return f"{base}:{port}"
 
-    def connect_peers(self, pub_endpoints: Mapping[int, str]) -> None:
+    def connect_peers(
+        self,
+        pub_endpoints: Mapping[int, str],
+        rep_endpoints: Mapping[int, str] | None = None,
+    ) -> None:
         """Connect the SUB to every given peer PUB (never to its own).
 
         ``pub_endpoints`` maps node id to PUB endpoint; the ids become
-        ``peer_ids``, the set the step barrier waits for.
+        ``peer_ids``, the set the step barrier waits for. ``rep_endpoints``
+        is only recorded: a REQ connects per request, in ``send_request``.
         """
         if self._closed or self.sub is None:
             raise CommError(f"node {self.node_id} is closed")
+        if rep_endpoints is not None:
+            self.rep_endpoints.update(rep_endpoints)
         for peer_id, endpoint in pub_endpoints.items():
             if peer_id == self.node_id:
                 continue
@@ -489,6 +585,180 @@ class PeerNode:
             )
         return self.inbox.get(step, {"status": {}, "orders": []})
 
+    def send_request(self, peer_id: int, body: str) -> PendingRequest:
+        """Send ``body`` to ``peer_id``'s REP and return at once.
+
+        Takes an idle REQ for ``peer_id`` from the pool or opens one. The
+        reply is read later with ``collect_reply``; until then the request
+        is listed in ``open_requests``.
+        """
+        if self._closed:
+            raise CommError(f"node {self.node_id} is closed")
+        if peer_id not in self.rep_endpoints:
+            raise ValueError(f"node {self.node_id} has no REP endpoint for peer {peer_id}")
+        if not isinstance(body, str):
+            raise TypeError(f"request body must be str, got {type(body).__name__}")
+        payload = body.encode("utf-8")
+        opened = time.perf_counter()
+        idle = self._idle_reqs.get(peer_id)
+        if idle:
+            sock = idle.pop()
+        else:
+            sock = self._socket(self._ctx, zmq.REQ)
+            try:
+                # Connected to exactly one REP, ever: a REQ connected to
+                # several REPs round-robins its requests over them, so the
+                # target could not be chosen and the body would reach the
+                # wrong agent (Architecture 4.3). Pooling is per target for
+                # the same reason.
+                sock.connect(self.rep_endpoints[peer_id])
+            except Exception:
+                sock.close(linger=0)
+                raise
+            self.stats.req_opened += 1
+        sent_at = time.perf_counter()
+        try:
+            # HWM > 0 queues the message even before a fresh REQ's
+            # connection is up, so this never blocks.
+            sock.send(payload, zmq.NOBLOCK)
+        except Exception:
+            sock.close(linger=0)
+            raise
+        pending = PendingRequest(
+            node_id=self.node_id,
+            peer_id=peer_id,
+            body=body,
+            socket=sock,
+            sent_at=sent_at,
+            churn_ms=1000.0 * (sent_at - opened),
+        )
+        self._pending.add(pending)
+        self.stats.requests += 1
+        return pending
+
+    def collect_reply(self, pending: PendingRequest, timeout_s: float = 0.0) -> str | None:
+        """Wait at most ``timeout_s`` for ``pending``'s reply, then finish it.
+
+        Returns the reply, or ``None`` after counting a timeout. An answered
+        REQ goes back to the pool; a timed-out one is closed with
+        ``LINGER=0``, so nothing waits on a peer that never answers. Never a
+        blocking ``recv`` (see the module docstring).
+        """
+        if pending.done:
+            return pending.reply
+        if pending.socket is None or pending not in self._pending:
+            raise CommError(f"request to {pending.peer_id} is not open on node {self.node_id}")
+        if not pending.socket.poll(math.ceil(1000.0 * max(timeout_s, 0.0)), zmq.POLLIN):
+            self._finish_request(pending, None)
+            return None
+        return self._read_reply(pending)
+
+    def _read_reply(self, pending: PendingRequest) -> str | None:
+        """Read the reply a poll reported as ready and finish ``pending``."""
+        assert pending.socket is not None
+        try:
+            frames = pending.socket.recv_multipart(zmq.NOBLOCK)
+        except zmq.Again:
+            self._finish_request(pending, None)
+            return None
+        received_at = time.perf_counter()
+        try:
+            reply = frames[-1].decode("utf-8")
+        except UnicodeDecodeError:
+            # Answered, so not a timeout; but there is no str to hand back.
+            self.stats.protocol_errors += 1
+            self._finish_request(pending, None, timed_out=False, answered=True)
+            return None
+        pending.rtt_ms = 1000.0 * (received_at - pending.sent_at)
+        self.stats.rtt_ms.append(pending.rtt_ms)
+        self.stats.replies += 1
+        self._finish_request(pending, reply, timed_out=False, answered=True)
+        return reply
+
+    def _finish_request(
+        self,
+        pending: PendingRequest,
+        reply: str | None,
+        timed_out: bool = True,
+        answered: bool = False,
+    ) -> None:
+        """Pool the REQ if its reply was read, otherwise close it."""
+        if timed_out:
+            self.stats.timeouts += 1
+        if pending.socket is not None:
+            if answered and not self._closed:
+                # Reply read: the REQ can send again, to this target only.
+                self._idle_reqs.setdefault(pending.peer_id, []).append(pending.socket)
+            else:
+                closing = time.perf_counter()
+                pending.socket.close(linger=0)
+                pending.churn_ms += 1000.0 * (time.perf_counter() - closing)
+        self.stats.req_churn_ms.append(pending.churn_ms)
+        pending.socket = None
+        pending.reply = reply
+        pending.done = True
+        self._pending.discard(pending)
+
+    def request(self, peer_id: int, body: str, timeout_s: float | None = None) -> str | None:
+        """Send ``body`` to ``peer_id`` and wait for the reply; ``None`` on timeout.
+
+        Only answered when the target's REP is served while this waits; in
+        the single-threaded simulation use ``PeerNetwork.negotiation_rounds``.
+        Returns within ``timeout_s`` (default ``request_timeout_s``) either way.
+        """
+        if timeout_s is None:
+            timeout_s = self.config.request_timeout_s
+        return self.collect_reply(self.send_request(peer_id, body), timeout_s)
+
+    def serve_requests(
+        self,
+        handler: Callable[[str], str],
+        timeout_s: float = 0.0,
+        error_reply: Callable[[str, Exception], str] = default_error_reply,
+    ) -> int:
+        """Answer every request waiting on the REP; returns how many.
+
+        Waits at most ``timeout_s`` for the first one, then reads without
+        blocking until the REP is empty. Every request read gets a reply:
+        when ``handler`` raises, ``error_reply(body, exc)`` is sent instead
+        (REP must answer before it can read the next request, and the
+        requester would otherwise only see a timeout).
+        """
+        if self._closed or self.rep is None:
+            raise CommError(f"node {self.node_id} is closed")
+        if not self._rep_poller.poll(math.ceil(1000.0 * max(timeout_s, 0.0))):
+            return 0
+        count = 0
+        while True:
+            try:
+                frames = self.rep.recv_multipart(zmq.NOBLOCK)
+            except zmq.Again:
+                return count
+            try:
+                reply = handler(frames[-1].decode("utf-8"))
+                if not isinstance(reply, str):
+                    raise TypeError(f"handler returned {type(reply).__name__}, not str")
+            except Exception as exc:
+                self.stats.handler_errors += 1
+                body = frames[-1].decode("utf-8", errors="replace")
+                try:
+                    reply = error_reply(body, exc)
+                except Exception:
+                    reply = default_error_reply(body, exc)
+            self.rep.send(reply.encode("utf-8"))
+            self.stats.served += 1
+            count += 1
+
+    @property
+    def open_requests(self) -> int:
+        """Requests sent and not yet finished (answered or timed out)."""
+        return len(self._pending)
+
+    @property
+    def req_sockets(self) -> int:
+        """REQ sockets this node holds: in flight plus idle in the pool."""
+        return len(self._pending) + sum(len(idle) for idle in self._idle_reqs.values())
+
     @property
     def closed(self) -> bool:
         return self._closed
@@ -497,9 +767,15 @@ class PeerNode:
         return [s for s in (self.pub, self.sub, self.rep) if s is not None]
 
     def close(self) -> None:
-        """Close all sockets; safe to call more than once."""
+        """Close all sockets, REQs included; safe to call more than once."""
         if self._closed:
             return
+        for pending in list(self._pending):
+            self._finish_request(pending, None, timed_out=False)
+        for idle in self._idle_reqs.values():
+            for sock in idle:
+                sock.close(linger=0)
+        self._idle_reqs.clear()
         for sock in self.sockets():
             sock.close(linger=0)
         self._closed = True
