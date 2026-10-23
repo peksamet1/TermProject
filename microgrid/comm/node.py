@@ -201,6 +201,54 @@ class CommStats:
     def order_loss(self) -> int:
         return self.order_expected - self.order_received
 
+    def percentile_of(self, name: str, q: float) -> float | None:
+        """``q``-th percentile of the sample list ``name``; ``None`` if empty."""
+        if name not in SAMPLE_FIELDS:
+            raise ValueError(f"{name!r} is not a CommStats sample list ({SAMPLE_FIELDS})")
+        return percentile(getattr(self, name), q)
+
+    def summary(self) -> dict[str, float | int | None]:
+        """Flat raw snapshot: every counter, both losses, p50 / p95 per sample list.
+
+        Raw on purpose (Architecture 4.6): ``metrics.py`` in Phase 5/6 turns
+        this into KPIs; nothing here is rounded or labelled for a report.
+        """
+        out: dict[str, float | int | None] = {
+            "handshake_ms": self.handshake_ms,
+            "handshake_rounds": self.handshake_rounds,
+            "steps": self.steps,
+            "degraded_steps": self.degraded_steps,
+            "status_loss_steps": self.status_loss_steps,
+        }
+        for name in NODE_COUNTERS:
+            out[name] = getattr(self, name)
+        out["status_loss"] = self.status_loss
+        out["order_loss"] = self.order_loss
+        for name in SAMPLE_FIELDS:
+            stem = name.removesuffix("_ms")
+            out[f"{stem}_n"] = len(getattr(self, name))
+            out[f"{stem}_p50_ms"] = self.percentile_of(name, 50)
+            out[f"{stem}_p95_ms"] = self.percentile_of(name, 95)
+        return out
+
+
+def percentile(samples: list[float], q: float) -> float | None:
+    """``q``-th percentile (0-100) with linear interpolation; ``None`` if empty.
+
+    Same definition as numpy's default ("linear"), written out so that the
+    comm layer does not pull numpy in for one function: with sorted samples
+    x, the position is (n - 1) * q / 100, interpolated between neighbours.
+    """
+    if not 0.0 <= q <= 100.0:
+        raise ValueError(f"percentile must be in [0, 100], got {q}")
+    if not samples:
+        return None
+    xs = sorted(samples)
+    pos = (len(xs) - 1) * q / 100.0
+    lo = math.floor(pos)
+    hi = math.ceil(pos)
+    return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo)
+
 
 # CommStats counters a node fills itself; PeerNetwork.stats() sums them.
 NODE_COUNTERS = (
@@ -220,6 +268,8 @@ NODE_COUNTERS = (
 )
 # CommStats sample lists a node fills itself; PeerNetwork.stats() concatenates them.
 NODE_SAMPLES = ("latency_ms", "rtt_ms", "req_churn_ms")
+# Every CommStats sample list: the per-node ones plus the network's barrier_ms.
+SAMPLE_FIELDS = (*NODE_SAMPLES, "barrier_ms")
 
 
 @dataclass(eq=False)

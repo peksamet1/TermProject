@@ -213,7 +213,11 @@ class PeerNetwork:
         return self._ready
 
     def stats(self) -> CommStats:
-        """Snapshot: the network-wide counters plus every node's, summed."""
+        """Snapshot: the network-wide counters plus every node's, summed.
+
+        Sample lists are concatenated over nodes, so the snapshot's
+        ``percentile_of`` / ``summary()`` give network-wide p50 / p95.
+        """
         total = replace(
             self._stats,
             barrier_ms=list(self._stats.barrier_ms),
