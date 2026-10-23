@@ -144,8 +144,10 @@ class PeerNetwork:
             # One poller over every SUB: a wait wakes on the first arrival
             # at any node instead of sleeping a fixed time.
             self._poller = zmq.Poller()
+            self._node_of_sub: dict[zmq.Socket, PeerNode] = {}
             for node in self.nodes.values():
                 self._poller.register(node.sub, zmq.POLLIN)
+                self._node_of_sub[node.sub] = node
         except Exception:
             self.close()
             raise
@@ -248,10 +250,15 @@ class PeerNetwork:
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
                 break
-            self._poller.poll(math.ceil(1000.0 * remaining))
-            # Drain every node, finished or not: a SUB left holding data (say,
-            # step + 1 traffic) would make every later poll return at once.
-            arrived = {i for i, node in self.nodes.items() if node.drain(0)}
+            ready = self._poller.poll(math.ceil(1000.0 * remaining))
+            # Drain every SUB the poll reported, finished node or not: one left
+            # holding data (say, step + 1 traffic) would make every later poll
+            # return at once. SUBs it did not report hold nothing to read.
+            arrived = {
+                node.node_id
+                for node in (self._node_of_sub[sock] for sock, _ in ready)
+                if node.drain(0)
+            }
             waiting -= {i for i in waiting & arrived if self.nodes[i].barrier_state(step).complete}
         barrier_ms = 1000.0 * (time.perf_counter() - start)
 
@@ -264,6 +271,8 @@ class PeerNetwork:
         self._stats.barrier_ms.append(barrier_ms)
         if report.degraded:
             self._stats.degraded_steps += 1
+        if report.status_loss:
+            self._stats.status_loss_steps += 1
         return report
 
     def _timeout_message(self, unheard: dict[int, list[int]], rounds: int) -> str:

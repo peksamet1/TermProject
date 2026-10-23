@@ -394,6 +394,7 @@ def test_missing_peer_never_hangs_the_barrier(comm_config):
         assert not net.await_step(3).degraded
         stats = net.stats()
         assert stats.degraded_steps == 3
+        assert stats.status_loss_steps == 2  # steps 0 and 2; step 1 lost only an ORDER
         assert stats.status_loss == 4 and stats.order_loss == 2
 
 
@@ -497,6 +498,7 @@ def test_ten_nodes_ten_steps_lossless_and_identical(comm_config):
         assert stats.status_expected == stats.status_received == 10 * 10 * 9
         assert stats.order_expected == stats.order_received > 0
         assert stats.late == stats.protocol_errors == stats.degraded_steps == 0
+        assert stats.status_loss_steps == 0
 
 
 def test_latency_is_sampled_once_per_received_message(comm_config):

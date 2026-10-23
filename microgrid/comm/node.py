@@ -77,8 +77,9 @@ def expected_per_step(num_nodes: int) -> int:
 
     N - 1 arrive from peers over the SUB; those are what the barrier waits
     for and what can be lost. The node's own one never travels (a SUB does
-    not hear its own PUB) and is delivered locally by ``publish``. It is
-    *not* the ORDER count: an IDLE peer sends no ORDER, so expected ORDERs
+    not hear its own PUB) and is delivered locally by ``publish``. The STATUS
+    count derives from this function and nowhere else; ``barrier_state``
+    subtracts the local one. It is *not* the ORDER count: an IDLE peer sends no ORDER, so expected ORDERs
     are derived from the non-IDLE STATUSes actually received.
     """
     from_peers = num_nodes - 1
@@ -104,6 +105,9 @@ class CommStats:
     # step_timeout_s with something still missing on at least one node.
     steps: int = 0
     degraded_steps: int = 0
+    # Degraded steps in which a STATUS was lost: in these order_loss is only
+    # a lower bound, so a "0 loss" claim has to state this count next to it.
+    status_loss_steps: int = 0
     barrier_ms: list[float] = field(default_factory=list)
     # Barrier accounting at close. STATUS is expected from every peer, ORDER
     # from every peer whose *received* STATUS is not IDLE: the ORDER of a
@@ -180,7 +184,12 @@ class HandshakeTimeout(CommError):
 
 
 class StepTimeout(CommError):
-    """Raised when a step barrier cannot be completed in time."""
+    """Reserved; nothing raises it today.
+
+    ``PeerNetwork.await_step`` never raises on a timeout: it counts the loss
+    and returns a degraded ``StepReport`` (see its module docstring), so
+    there is nothing to catch around the barrier.
+    """
 
 
 class PeerNode:
@@ -428,7 +437,8 @@ class PeerNode:
         return StepResult(
             node_id=self.node_id,
             step=step,
-            status_expected=len(self.peer_ids),
+            # Own STATUS is local and never waited for.
+            status_expected=expected_per_step(len(self.peer_ids) + 1) - 1,
             order_expected=len(committed),
             missing_status=tuple(sorted(self.peer_ids - statuses.keys())),
             missing_orders=tuple(sorted(committed - ordered)),
