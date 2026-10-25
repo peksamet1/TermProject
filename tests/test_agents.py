@@ -7,6 +7,7 @@ stubs so assertions never depend on synthetic randomness.
 
 import math
 
+import pandas as pd
 import pytest
 
 from microgrid.agents.battery import Battery
@@ -17,8 +18,12 @@ from microgrid.agents.household import (
     ProsumerAgent,
 )
 from microgrid.config import SimulationConfig
-from microgrid.market.base import OrderSide
+from microgrid.comm.protocol import make_status_message
+from microgrid.market.base import LoggingMarket, OrderSide
+from microgrid.market.cda import CDAMarket
 from microgrid.model import MicrogridModel
+from microgrid.profiles.consumption import ConsumptionProfile
+from microgrid.profiles.solar import SolarProfile
 
 from .conftest import ConstantProfile
 
@@ -164,3 +169,108 @@ def test_order_prices_stay_inside_tariff_band(strategy):
 def test_tiny_residual_produces_no_order(strategy):
     assert strategy.make_order(agent_id=1, residual_kwh=0.001, step=0) is None
     assert strategy.make_order(agent_id=1, residual_kwh=-0.001, step=0) is None
+
+
+# --- publish_status hook (Phase 3, step 6) --------------------------------
+
+
+class _RecordingCDA(CDAMarket):
+    """CDA backend that records every publish_status call."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.statuses: list[tuple[int, int, HouseholdState]] = []
+
+    def publish_status(self, agent) -> None:
+        self.statuses.append((agent.model.current_step, agent.unique_id, agent.state))
+
+
+class _RecordingLogging(LoggingMarket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.statuses: list[tuple[int, int, HouseholdState]] = []
+
+    def publish_status(self, agent) -> None:
+        self.statuses.append((agent.model.current_step, agent.unique_id, agent.state))
+
+
+@pytest.mark.parametrize("market_cls", [_RecordingCDA, _RecordingLogging])
+def test_every_agent_publishes_status_every_step_idle_included(market_cls):
+    model = MicrogridModel(seed=42)
+    model.market = market_cls()
+    steps = model.config.steps_per_day  # one day: night, sunrise, noon surplus
+    model.run(steps)
+    ids = sorted(agent.unique_id for agent in model.agents)
+    for step in range(steps):
+        reported = sorted(i for s, i, _ in model.market.statuses if s == step)
+        assert reported == ids  # each agent exactly once per step
+    states = {state for _, _, state in model.market.statuses}
+    assert HouseholdState.IDLE in states  # IDLE agents report too
+
+
+class _StatusBuildingCDA(CDAMarket):
+    """Fills the hook the way Phase 4's ZmqMarket will: a STATUS built from
+    the agent's cached fields only. The run must not change by one value."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent = 0
+
+    def publish_status(self, agent) -> None:
+        make_status_message(
+            agent_id=agent.unique_id,
+            step=agent.model.current_step,
+            generation_kwh=agent.generation_kwh,
+            consumption_kwh=agent.consumption_kwh,
+            residual_kwh=agent.residual_kwh,
+            state=agent.state.value,
+            soc=agent.soc,
+        )
+        self.sent += 1
+
+
+class _StatusBuildingLogging(LoggingMarket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent = 0
+
+    publish_status = _StatusBuildingCDA.publish_status
+
+
+@pytest.mark.parametrize(
+    ("backend", "market_cls"),
+    [("cda", _StatusBuildingCDA), ("logging", _StatusBuildingLogging)],
+)
+def test_status_hook_does_not_shift_the_shared_rng(backend, market_cls, monkeypatch):
+    steps = 48
+
+    def run(market=None):
+        model = MicrogridModel(market_backend=backend, seed=123)
+        if market is not None:
+            model.market = market
+        model.run(steps)
+        dc = model.datacollector
+        return model, dc.get_model_vars_dataframe(), dc.get_agent_vars_dataframe()
+
+    _, plain_model_df, plain_agent_df = run()
+
+    # A second read inside the hook would show up here before anywhere else.
+    reads = {"solar": 0, "consumption": 0}
+    for cls, key in ((SolarProfile, "solar"), (ConsumptionProfile, "consumption")):
+        original = cls.energy_at
+
+        def counting(self, step, _original=original, _key=key):
+            reads[_key] += 1
+            return _original(self, step)
+
+        monkeypatch.setattr(cls, "energy_at", counting)
+
+    hooked, hooked_model_df, hooked_agent_df = run(market_cls())
+    assert hooked.market.sent == steps * len(hooked.agents)
+    num_prosumers = len(hooked.agents_by_type[ProsumerAgent])
+    assert reads == {
+        "solar": steps * num_prosumers,
+        "consumption": steps * len(hooked.agents),
+    }
+    pd.testing.assert_frame_equal(hooked_model_df, plain_model_df)
+    pd.testing.assert_frame_equal(hooked_agent_df, plain_agent_df)

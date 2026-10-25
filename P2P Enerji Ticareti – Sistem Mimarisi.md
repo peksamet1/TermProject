@@ -83,7 +83,7 @@ Her bileşen mevcut koddaki bir modüle ya da eklenecek tek bir dosyaya karşıl
   - PUB: kendi STATUS ve ORDER mesajları, multipart `[topic, json]`.
   - SUB: diğer tüm düğümlerin PUB'larına bağlı, `status` ve `order` topic'lerine abone. SUB kendi PUB'ını duymadığı için düğüm kendi mesajını doğrudan kendi gelen kutusuna koyar.
   - REP: kendisine gelen ticaret isteklerini cevaplar.
-  - REQ: istek başına açılıp kapanan, yalnızca hedef satıcının REP'ine bağlı soket. Tek bir REQ birden çok REP'e bağlanırsa istekleri sırayla dağıtır ve hedef seçilemez.
+  - REQ: yalnızca hedef satıcının REP'ine bağlı soket. Tek bir REQ birden çok REP'e bağlanırsa istekleri sırayla dağıtır ve hedef seçilemez. İstek başına açılıp kapanmaz, hedef başına havuzda tutulur ve yeniden kullanılır: istek başına REQ her istekte yeni bir tcp bağlantısı açıp kapanışta bir portu TIME_WAIT'te bırakıyordu (ölçüm 4.7'de). Zaman aşımına düşen REQ kapatılır, havuza dönmez.
 - `PeerNetwork` (`comm/network.py`): düğümleri kurar, `tcp://127.0.0.1` üzerinde rastgele boş porta bağlar (`bind_to_random_port`, böylece aynı anda çalışan iki model çakışmaz), tam mesh bağlantıyı kurar, tüm soketlerde `LINGER=0` kullanır ve `close()` sağlar.
 - Hazır olma el sıkışması: PUB-SUB bağlantısı kurulduktan hemen sonra yayınlanan mesajlar kaybolur ("slow joiner"; prototipte ilk mesajların %100'ü). Her düğüm yaklaşık 10 ms'de bir `step = -1` olan bir STATUS yayınlar ve herkes herkesten duyana kadar sürer; zaman aşımında hata verir. Sabit bekleme kullanılmaz.
 - Adım senkronizasyonu: düğüm, adım t için N − 1 STATUS'u ve IDLE olmayan her peer'den bir ORDER'ı bekler (STATUS.state ≠ IDLE, bir ORDER geleceği anlamına gelir). Zaman aşımında (örn. 1–2 sn) eksikler kayıp, geç gelenler geç olarak sayılır.
@@ -121,7 +121,22 @@ Her bileşen mevcut koddaki bir modüle ya da eklenecek tek bir dosyaya karşıl
 
 ### 4.7 Ön doğrulama
 
-Bu tasarım 8 Ekim 2026'da mevcut kodun üzerinde, atılıp kullanılacak prototiplerle denendi. ZeroMQ katmanı 3, 10, 30 ve 50 düğümde 2 günlük koşularda hiç mesaj kaybetmedi ve tüm kopyalar süreç içi CDA ile birebir aynı işlemleri üretti. Adım süresi p50 değerleri N = 10'da \~5 ms, N = 50'de \~150 ms çıktı. SimPy katmanı 3 günlük koşuda senkron kaldı ve SoC hiçbir dakikada sınır dışına çıkmadı.
+Bu tasarım 8 Ekim 2026'da atılıp kullanılacak prototiplerle denendi; o prototiplerin rakamları repoda üretilmemişti. ZeroMQ katmanının rakamları Faz 3'te repodaki kodla yeniden ölçüldü ve aşağıdaki tablo onların yerini alır.
+
+**Koşul:** `experiments/comm_scale.py`; sentetik emir akışı (sabit seed'li, Mesa profillerinden ve CDA'dan bağımsız); `active_ratio = 1.0`, yani her düğüm her adım hem STATUS hem ORDER yayınlar, adım başına mümkün olan en fazla mesaj; 192 adım (2 gün), seed 42; tcp; ardından herkesin herkese istek attığı 5 REQ-REP turu. macOS (Darwin 25.6.0 arm64), Python 3.13.1, pyzmq 27.2.0, libzmq 4.3.5; her hücre tek koşu. Gerçek veri bu mesaj tavanını aşamayacağı için rakamlar veri kaynağı değişince geçerliliğini korur. Adım süresi, bir adımın ilk yayınından bariyerin tüm düğümlerde kapanmasına kadar geçen süredir.
+
+| N | Mesaj / adım | Kayıp | Zaman aşımı | Adım süresi p50 / p95 | REQ-REP RTT p50 / p95 |
+| --- | --- | --- | --- | --- | --- |
+| 3 | 6 | 0 | 0 | 0.35 / 0.77 ms | 0.47 / 1.70 ms |
+| 10 | 20 | 0 | 0 | 2.25 / 2.39 ms | 2.77 / 14.27 ms |
+| 30 | 60 | 0 | 0 | 19.08 / 20.72 ms | 41.70 / 148.45 ms |
+| 50 | 100 | 0 | 0 | 57.09 / 60.87 ms | 179.13 / 472.02 ms |
+
+- Dört N'nin hepsinde degraded adım, geç mesaj ve protokol hatası 0; her adımda tüm düğümler aynı emir listesini aynı sırada gördü. `active_ratio = 0.5` ve `inproc` satırları README'de; tcp her N'de yetti, `inproc`'a geçmek gerekmedi.
+- Prototipin "N = 10'da \~5 ms, N = 50'de \~150 ms" adım süresi rakamları ölçülenden yüksek. Sebebi bilinmiyor: prototip ve onun ölçüm tanımı repoda yok. Ölçülen rakam esas alınır.
+- RTT 5 turun hepsini kapsar; ilk turda bağlantı kurulumu da var, bu yüzden tek turluk bir ölçüm daha yüksek çıkar. N = 50'deki 472 ms'lik p95, varsayılan 1 sn'lik istek zaman aşımının yarısına yakın; Faz 4'te handler gerçek doğrulama yaptığında yeniden ölçülmeli.
+- REQ havuzu (4.3): istek başına REQ ile N = 50'de bir tur 901 ms (p50) sürdü ve her istek bir tcp bağlantısını TIME_WAIT'te bıraktı; havuzla aynı tur 283 ms, ağ açıkken TIME_WAIT 0.
+- Kopyaların süreç içi CDA ile aynı işlemleri ürettiği iddiası Faz 4'ün (`cda_zmq`) işidir ve henüz yeniden üretilmedi. SimPy katmanına ait iddia da Faz 5'te yeniden üretilecek; ikisi de şimdilik doğrulanmamış prototip gözlemidir.
 
 ## 5. Veri modelleri ve mesaj formatları
 

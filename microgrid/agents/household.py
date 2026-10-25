@@ -10,6 +10,8 @@ Step flow (battery-before-market priority):
 2. net = generation - consumption
 3. If a battery exists, charge with surplus / discharge to cover a deficit.
 4. Residual surplus -> SELL ask, residual deficit -> BUY bid, ~0 -> IDLE.
+5. Report the step to the market (``publish_status``), IDLE included: the
+   ZeroMQ step barrier expects a STATUS from every agent every step.
 """
 
 from __future__ import annotations
@@ -104,6 +106,8 @@ class HouseholdAgent(Agent, ABC):
                 else HouseholdState.BUYING
             )
             self.model.market.submit(order)
+        # Last, and unconditionally: everything it reports is cached above.
+        self.model.market.publish_status(self)
 
 
 class ProsumerAgent(HouseholdAgent):

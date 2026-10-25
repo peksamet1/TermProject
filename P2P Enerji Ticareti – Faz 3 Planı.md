@@ -371,6 +371,18 @@ zaman aşımını al" ve "kendine gelen istekleri şu handler ile cevapla".
    > eşzamanlı ikinci istek ek REQ açar. Adım 5'e etkisi: N=50'de her düğüm herkese
    > istek atarsa N(N−1) = 2450 kalıcı REQ bağlantısı oluşur ve bu fd/soket
    > bütçesine girer (`max_sockets_needed`).
+   >
+   > **Adım 5'te yeniden ölçüldü (25 Ekim 2026):** `experiments/comm_scale.py
+   > --req-mode per-request` istek başına REQ'i yeniden üretir. Koşul: Darwin 25.6.0
+   > arm64, Python 3.13.1, libzmq 4.3.5, tcp, `active_ratio = 1.0`, herkes herkese 5
+   > tur, her hücre TIME_WAIT'te 0 bağlantıyla başlayan tek koşu. Soket açma +
+   > bağlanma istek başına 0.03–0.06 ms (p50), yani baskın değil. İstek başına REQ
+   > ağ açıkken her istek için bir TIME_WAIT bıraktı (N=10'da 450, N=50'de 12250;
+   > havuzlu: 0). N=50'de bir tur istek başına 901 ms, havuzlu 283 ms sürdü
+   > (`request_timeout_s` 1.0): havuzun asıl gerekçesi bu zaman aşımı payı. Zaman
+   > aşımı ve "Can't assign requested address" tek, temiz başlatılmış koşuda
+   > yeniden ÜRETİLMEDİ; o gözlem 30 sn içinde arka arkaya yapılan koşulardandı.
+   > Havuzlu REQ'ler kapanışta açık çift başına yaklaşık bir TIME_WAIT bırakır.
 
 **Testler (~6).** Echo handler ile tek istek-cevap; 3 düğümde herkes herkese istek
 gönderir ve üç turda kilitlenmeden tamamlanır; REP'i hiç boşaltılmayan peer'e istek
@@ -410,6 +422,12 @@ Raporu'nun "Dikkat edilecekler" bölümündeki açık borç bu.
    `active_ratio ∈ {0.5, 1.0}`, 192 adım (2 gün × 96 adım — Mimari 4.7'deki "2 günlük
    koşu"), her N için aynı emir akışı. Her kombinasyon için ayrıca bir REQ-REP
    müzakere turu sürülür.
+   > **Uygulama notu (Adım 5, 24 Ekim 2026, ekip onaylı):** müzakere 1 değil 5 tur
+   > sürülür (`--negotiation-rounds`, varsayılan 5). Tek turda her çift yalnızca bir
+   > kez istek attığı için REQ havuzu hiç yeniden kullanılmıyor ve Adım 4 madde
+   > 6'nın gerekçesi ölçülemiyordu. Sonuç: RTT 5 turun hepsini kapsar; ilki bağlantı
+   > kurulumunu da içerdiğinden tek turluk ölçümden düşüktür (N=50 tcp p50: tek
+   > tur 498 ms, 5 tur 179 ms).
 4. **`active_ratio = 1.0` manşet rakamdır, çünkü üst sınırdır.** Adım başına mesaj
    sayısı = `N` STATUS + (IDLE olmayan düğüm sayısı) ORDER; `active_ratio = 1.0`
    bunun mümkün olan maksimumudur (her düğüm hem STATUS hem ORDER yayınlar). Mock
