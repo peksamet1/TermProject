@@ -426,8 +426,10 @@ Raporu'nun "Dikkat edilecekler" bölümündeki açık borç bu.
    > sürülür (`--negotiation-rounds`, varsayılan 5). Tek turda her çift yalnızca bir
    > kez istek attığı için REQ havuzu hiç yeniden kullanılmıyor ve Adım 4 madde
    > 6'nın gerekçesi ölçülemiyordu. Sonuç: RTT 5 turun hepsini kapsar; ilki bağlantı
-   > kurulumunu da içerdiğinden tek turluk ölçümden düşüktür (N=50 tcp p50: tek
-   > tur 498 ms, 5 tur 179 ms).
+   > kurulumunu da içerdiğinden tek turluk ölçümden düşüktür. N=50 tcp oran 1.0,
+   > `results/comm_scale.csv`: 5 tur RTT p50 179 ms (`baseline` satırı), tek tur
+   > 451 ms (`rounds=1` satırı, `--negotiation-rounds 1`). Tek tur üç ayrı koşuda
+   > 451–498 ms arasında ölçüldü.
 4. **`active_ratio = 1.0` manşet rakamdır, çünkü üst sınırdır.** Adım başına mesaj
    sayısı = `N` STATUS + (IDLE olmayan düğüm sayısı) ORDER; `active_ratio = 1.0`
    bunun mümkün olan maksimumudur (her düğüm hem STATUS hem ORDER yayınlar). Mock

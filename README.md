@@ -15,7 +15,7 @@ Fazlar PSD 8.1'i izler; ayrıntılar Geliştirme Planı dokümanında.
 |---|---|---|---|
 | 1 | Literatür, gereksinimler, tek kod tabanı, sabit veri yapıları | Tüm ekip | Tamamlandı |
 | 2 | Mesa ile ajan mantığı ve enerji profilleri | Erol | Çekirdek hazır; CSV verisi ve SoC'ye duyarlı strateji kaldı |
-| 3 | ZeroMQ P2P iletişim altyapısı | Kutluay | Tamamlandı; ekip makinelerinde 3 düğüm denemesi kaldı |
+| 3 | ZeroMQ P2P iletişim altyapısı | Kutluay | Kod ve ölçüm tamam; ekip makinelerinde 3 düğüm denemesi (C9) ve `main` PR'ı bekliyor |
 | 4 | CDA piyasa mekanizması (ZeroMQ üzerinden) | Yusuf | Süreç içi CDA hazır; `cda_zmq` kaldı |
 | 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | Başlanmadı |
 | 6 | Veri analizi ve final dokümantasyon | Yusuf | Başlanmadı |
@@ -210,8 +210,9 @@ yaklaşık bir TIME_WAIT bırakır.
 
 ### Bilinen sınırlar
 
-- **Zaman aşımı payı:** N = 50, tcp, herkes herkese istekte RTT p95 472 ms;
-  varsayılan `request_timeout_s` 1 sn. Faz 4'te handler gerçek CDA doğrulaması
+- **Zaman aşımı payı:** N = 50, tcp, herkes herkese istekte RTT p95 472 ms
+  (5 tur); bağlantıların henüz kurulmadığı ilk turda tek başına 525 ms ve tur
+  süresi 692 ms (`rounds=1` satırı). Varsayılan `request_timeout_s` 1 sn. Faz 4'te handler gerçek CDA doğrulaması
   yapınca bu pay daralır, tekrar ölçülmeli.
 - **libzmq 4.3.5'te nadir fd sızıntısı:** ağ, bağlantıları henüz kurulurken
   (el sıkışmadan önce) kapatılırsa libzmq bazen bir tcp fd'sini kalıcı olarak

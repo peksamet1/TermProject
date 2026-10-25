@@ -174,37 +174,67 @@ def test_tiny_residual_produces_no_order(strategy):
 # --- publish_status hook (Phase 3, step 6) --------------------------------
 
 
+def _snapshot(agent) -> tuple:
+    """What a STATUS would carry; NaN soc (no battery) as None so it compares."""
+    soc = None if math.isnan(agent.soc) else agent.soc
+    return (
+        agent.state,
+        agent.generation_kwh,
+        agent.consumption_kwh,
+        agent.residual_kwh,
+        soc,
+    )
+
+
 class _RecordingCDA(CDAMarket):
-    """CDA backend that records every publish_status call."""
+    """CDA backend that records what every publish_status call saw."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.statuses: list[tuple[int, int, HouseholdState]] = []
+        self.statuses: dict[tuple[int, int], list[tuple]] = {}
 
     def publish_status(self, agent) -> None:
-        self.statuses.append((agent.model.current_step, agent.unique_id, agent.state))
+        key = (agent.model.current_step, agent.unique_id)
+        self.statuses.setdefault(key, []).append(_snapshot(agent))
 
 
 class _RecordingLogging(LoggingMarket):
     def __init__(self) -> None:
         super().__init__()
-        self.statuses: list[tuple[int, int, HouseholdState]] = []
+        self.statuses: dict[tuple[int, int], list[tuple]] = {}
 
-    def publish_status(self, agent) -> None:
-        self.statuses.append((agent.model.current_step, agent.unique_id, agent.state))
+    publish_status = _RecordingCDA.publish_status
 
 
 @pytest.mark.parametrize("market_cls", [_RecordingCDA, _RecordingLogging])
-def test_every_agent_publishes_status_every_step_idle_included(market_cls):
+def test_every_agent_publishes_its_own_step_last_idle_included(market_cls, monkeypatch):
+    # Called last in step(), so it reports this step's values. Called first,
+    # it would report the previous step's state and residual: Phase 4's
+    # barrier would then wait for an ORDER that never comes, or miss one.
+    end_of_step: dict[tuple[int, int], tuple] = {}
+    original_step = HouseholdAgent.step
+
+    def recording_step(self):
+        original_step(self)
+        end_of_step[(self.model.current_step, self.unique_id)] = _snapshot(self)
+
+    monkeypatch.setattr(HouseholdAgent, "step", recording_step)
     model = MicrogridModel(seed=42)
     model.market = market_cls()
     steps = model.config.steps_per_day  # one day: night, sunrise, noon surplus
     model.run(steps)
-    ids = sorted(agent.unique_id for agent in model.agents)
+
+    ids = {agent.unique_id for agent in model.agents}
+    assert set(model.market.statuses) == {(s, i) for s in range(steps) for i in ids}
+    for key, reported in model.market.statuses.items():
+        assert reported == [end_of_step[key]]  # exactly once, with this step's values
     for step in range(steps):
-        reported = sorted(i for s, i, _ in model.market.statuses if s == step)
-        assert reported == ids  # each agent exactly once per step
-    states = {state for _, _, state in model.market.statuses}
+        # A non-IDLE STATUS commits its sender to an ORDER in the same step.
+        committed = {
+            i for i in ids if model.market.statuses[(step, i)][0][0] is not HouseholdState.IDLE
+        }
+        assert committed == {o.agent_id for o in model.market.orders_at(step)}
+    states = {reported[0][0] for reported in model.market.statuses.values()}
     assert HouseholdState.IDLE in states  # IDLE agents report too
 
 

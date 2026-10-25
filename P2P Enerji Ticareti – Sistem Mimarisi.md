@@ -134,7 +134,7 @@ Bu tasarım 8 Ekim 2026'da atılıp kullanılacak prototiplerle denendi; o proto
 
 - Dört N'nin hepsinde degraded adım, geç mesaj ve protokol hatası 0; her adımda tüm düğümler aynı emir listesini aynı sırada gördü. `active_ratio = 0.5` ve `inproc` satırları README'de; tcp her N'de yetti, `inproc`'a geçmek gerekmedi.
 - Prototipin "N = 10'da \~5 ms, N = 50'de \~150 ms" adım süresi rakamları ölçülenden yüksek. Sebebi bilinmiyor: prototip ve onun ölçüm tanımı repoda yok. Ölçülen rakam esas alınır.
-- RTT 5 turun hepsini kapsar; ilk turda bağlantı kurulumu da var, bu yüzden tek turluk bir ölçüm daha yüksek çıkar. N = 50'deki 472 ms'lik p95, varsayılan 1 sn'lik istek zaman aşımının yarısına yakın; Faz 4'te handler gerçek doğrulama yaptığında yeniden ölçülmeli.
+- RTT 5 turun hepsini kapsar; ilk turda bağlantı kurulumu da var, bu yüzden tek turluk bir ölçüm daha yüksek çıkar: N = 50'de yalnız ilk tur RTT p95 525 ms, tur süresi 692 ms. 5 turluk 472 ms'lik p95 de varsayılan 1 sn'lik istek zaman aşımının yarısına yakın; Faz 4'te handler gerçek doğrulama yaptığında yeniden ölçülmeli.
 - REQ havuzu (4.3): istek başına REQ ile N = 50'de bir tur 901 ms (p50) sürdü ve her istek bir tcp bağlantısını TIME_WAIT'te bıraktı; havuzla aynı tur 283 ms, ağ açıkken TIME_WAIT 0.
 - Kopyaların süreç içi CDA ile aynı işlemleri ürettiği iddiası Faz 4'ün (`cda_zmq`) işidir ve henüz yeniden üretilmedi. SimPy katmanına ait iddia da Faz 5'te yeniden üretilecek; ikisi de şimdilik doğrulanmamış prototip gözlemidir.
 

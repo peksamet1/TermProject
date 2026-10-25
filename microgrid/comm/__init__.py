@@ -68,10 +68,18 @@ Measurements
 
 Known margin
     All-to-all at N = 50 over tcp measured a REQ-REP RTT p95 of 472 ms
-    against the 1.0 s default ``request_timeout_s`` (echo handler, 5 rounds
-    of which the first includes connection setup, synthetic order stream,
-    see README). A handler that does real CDA
-    checks narrows this; measure it before relying on the default.
+    over 5 rounds, and 525 ms with a 692 ms round in the first round alone,
+    while connections are still cold; ``request_timeout_s`` defaults to
+    1.0 s (echo handler, synthetic order stream, see README). A handler
+    that does real CDA checks narrows this; measure it before relying on
+    the default.
+
+Checks to carry over
+    ``tests/test_agents.py`` pins the hook: called last in ``step()`` with
+    that step's values, once per agent and step, IDLE included, a non-IDLE
+    STATUS matched by an ORDER, and profiles read exactly once per step.
+    Run the same assertions against ``ZmqMarket``, whose real
+    ``publish_status`` replaces the stubs used there.
 
 Not in Phase 3, deliberately: the ``cda_zmq`` backend, copy matching,
 TRADE / NACK semantics, ``trades_at``, settlement and grid fallback, and
