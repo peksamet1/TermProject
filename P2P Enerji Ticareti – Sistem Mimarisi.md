@@ -132,7 +132,7 @@ Bu tasarım 8 Ekim 2026'da atılıp kullanılacak prototiplerle denendi; o proto
 | 30 | 60 | 0 | 0 | 19.08 / 20.72 ms | 41.70 / 148.45 ms |
 | 50 | 100 | 0 | 0 | 57.09 / 60.87 ms | 179.13 / 472.02 ms |
 
-- Dört N'nin hepsinde degraded adım, geç mesaj ve protokol hatası 0; her adımda tüm düğümler aynı emir listesini aynı sırada gördü. `active_ratio = 0.5` ve `inproc` satırları README'de; tcp her N'de yetti, `inproc`'a geçmek gerekmedi.
+- Dört N'nin hepsinde degraded adım, geç mesaj ve protokol hatası 0; her adımda tüm düğümler aynı emir listesini aynı sırada gördü. `active_ratio = 0.5` ve `inproc` satırları README'de. Bu makinede (macOS) tcp her N'de yetti. Windows 11'de ise 50 düğüm tcp el sıkışması 5 sn'de tamamlanmadı, 30 düğüm tcp ve 50 düğüm `inproc` geçti. Sebebi henüz araştırılmadı; Windows'ta 30 düğümün üstünde `inproc` kullanılır (4.3'teki yedek plan).
 - Prototipin "N = 10'da \~5 ms, N = 50'de \~150 ms" adım süresi rakamları ölçülenden yüksek. Sebebi bilinmiyor: prototip ve onun ölçüm tanımı repoda yok. Ölçülen rakam esas alınır.
 - RTT 5 turun hepsini kapsar; ilk turda bağlantı kurulumu da var, bu yüzden tek turluk bir ölçüm daha yüksek çıkar: N = 50'de yalnız ilk tur RTT p95 525 ms, tur süresi 692 ms. 5 turluk 472 ms'lik p95 de varsayılan 1 sn'lik istek zaman aşımının yarısına yakın; Faz 4'te handler gerçek doğrulama yaptığında yeniden ölçülmeli.
 - REQ havuzu (4.3): istek başına REQ ile N = 50'de bir tur 901 ms (p50) sürdü ve her istek bir tcp bağlantısını TIME_WAIT'te bıraktı; havuzla aynı tur 283 ms, ağ açıkken TIME_WAIT 0.

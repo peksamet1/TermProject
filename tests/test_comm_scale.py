@@ -8,6 +8,7 @@ nobody runs it.
 
 import csv
 import dataclasses
+import sys
 
 import pytest
 
@@ -182,9 +183,28 @@ def test_main_writes_csv_and_png(tmp_path):
     assert out_png.stat().st_size > 0
 
 
+# Windows 11, 50 nodes over tcp: the readiness handshake did not complete
+# within handshake_timeout_s (5 s) in two runs on one team machine, with a
+# different set of unheard peers each time; 30 nodes over tcp and 50 over
+# inproc passed. Not diagnosed yet (the planned check is in the status
+# report), so it is marked, not hidden: non-strict, so a pass still shows.
+_WINDOWS_50_TCP = pytest.mark.xfail(
+    sys.platform == "win32",
+    reason="50-node tcp handshake exceeds 5 s on Windows; cause not diagnosed yet",
+    strict=False,
+)
+
+
 @pytest.mark.slow
-@pytest.mark.parametrize("transport", ["tcp", "inproc"])
-@pytest.mark.parametrize("num_nodes", [30, 50])
+@pytest.mark.parametrize(
+    ("num_nodes", "transport"),
+    [
+        (30, "tcp"),
+        (30, "inproc"),
+        pytest.param(50, "tcp", marks=_WINDOWS_50_TCP),
+        (50, "inproc"),
+    ],
+)
 def test_large_mesh_is_lossless(num_nodes, transport):
     row = run_one(num_nodes, transport, active_ratio=1.0, steps=SLOW_STEPS)
     _assert_clean(row)

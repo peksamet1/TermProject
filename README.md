@@ -15,14 +15,17 @@ Fazlar PSD 8.1'i izler; ayrıntılar Geliştirme Planı dokümanında.
 |---|---|---|---|
 | 1 | Literatür, gereksinimler, tek kod tabanı, sabit veri yapıları | Tüm ekip | Tamamlandı |
 | 2 | Mesa ile ajan mantığı ve enerji profilleri | Erol | Çekirdek hazır; CSV verisi ve SoC'ye duyarlı strateji kaldı |
-| 3 | ZeroMQ P2P iletişim altyapısı | Kutluay | Kod ve ölçüm tamam; ekip makinelerinde 3 düğüm denemesi (C9) ve `main` PR'ı bekliyor |
+| 3 | ZeroMQ P2P iletişim altyapısı | Kutluay | Tamamlandı; açık not: Windows'ta 50 düğüm tcp (aşağıda) |
 | 4 | CDA piyasa mekanizması (ZeroMQ üzerinden) | Yusuf | Süreç içi CDA hazır; `cda_zmq` kaldı |
 | 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | Başlanmadı |
 | 6 | Veri analizi ve final dokümantasyon | Yusuf | Başlanmadı |
 
 ## Kurulum ve Çalıştırma
 
-**Gereksinim:** Python 3.12 veya üstü (Mesa 3.5 bunu istiyor).
+**Gereksinim:** Python 3.12 veya üstü (Mesa 3.5 bunu istiyor). Önce
+`python --version` ile kontrol edin: macOS'un sistem Python'u 3.9 olabilir ve
+onunla kurulan sanal ortama paketler yüklenmez. Bu durumda sanal ortamı
+`python3.12 -m venv .venv` ya da `uv venv --python 3.12 .venv` ile kurun.
 
 ```powershell
 python -m venv .venv
@@ -162,8 +165,9 @@ birbirine istek atar, `1.0`'da N(N−1) istek/tur). macOS (Darwin 25.6.0
 arm64), Python 3.13.1, pyzmq 27.2.0, libzmq 4.3.5; her hücre tek koşu.
 "Adım süresi" bir adımın ilk yayınından bariyerin kapanmasına kadardır. RTT
 5 turun hepsini kapsar; ilk tur bağlantı kurulumunu da içerdiği için tek
-turluk ölçümden düşük çıkar. Her taşıma 50 düğümde çalıştı; `inproc`'a
-geçmek hiçbir N'de gerekmedi.
+turluk ölçümden düşük çıkar. Bu makinede her taşıma 50 düğümde çalıştı;
+`inproc`'a geçmek hiçbir N'de gerekmedi. Windows'ta durum farklı, bkz.
+"Bilinen sınırlar".
 
 | N | taşıma | oran | mesaj/adım | kayıp | zaman aşımı | adım p50 / p95 (ms) | PUB-SUB gecikme p50 / p95 (ms) | RTT p50 / p95 (ms) | el sıkışma (ms) |
 |---|---|---|---|---|---|---|---|---|---|
@@ -224,8 +228,28 @@ yaklaşık bir TIME_WAIT bırakır.
 - **Arka arkaya tcp koşuları:** tam matris kapanışta binlerce bağlantıyı
   TIME_WAIT'te bırakır. 30 sn içinde arka arkaya koşulursa geçici portlar
   tükenebilir; bu tek ve temiz başlatılmış koşularda görülmedi.
-- **Ölçümler tek makinede alındı.** Windows'ta `resource` modülü yok; dosya
-  limiti yükseltilemezse büyük tcp mesh'ler `inproc`'a düşebilir.
+- **Windows'ta 50 düğüm tcp: açık, sebebi henüz araştırılmadı.** Windows 11'de
+  el sıkışma 5 sn'lik `handshake_timeout_s` içinde tamamlanmadı (iki koşu, her
+  seferinde farklı düğümler eksik). Aynı makinede 30 düğüm tcp ve 50 düğüm
+  `inproc` geçti. Yavaşlık mı, Windows'a özgü bir engel mi olduğu, Durum
+  Raporu'nda yazılı tanı komutuyla ileride netleşecek. O zamana kadar
+  Windows'ta 30 düğümün üstünde `transport="inproc"` kullanın. İlgili test
+  (`test_large_mesh_is_lossless[50-tcp]`) yalnızca Windows'ta `xfail` olarak
+  işaretli; macOS ve Linux'ta normal koşar.
+- **Windows'ta `resource` modülü yok**, bu yüzden dosya limiti yükseltilemez ve
+  bir uyarı basılır; dosya limitiyle ilgili 2 test Windows'ta atlanır.
+
+### Platform denemesi (C9)
+
+Aynı `faz3` commit'i (`d679d49`), üç ekip üyesinin makinesinde. Ölçüm
+satırları her makinede tek koşudur; ekip arkadaşlarının satırları kendi
+bildirdikleri çıktılardır.
+
+| Makine | İşletim sistemi | Python | `pytest` | `pytest -m slow` | 3 ve 10 düğüm deneyi | Adım p50, N=10 tcp, oran 1.0 |
+|---|---|---|---|---|---|---|
+| Erol | macOS (Darwin 25.6.0, arm64) | 3.13.1 | 198 geçti | 4/4 | kayıp 0, zaman aşımı 0 | 2.25 ms |
+| Kutluay | macOS (Darwin 25.3.0, Apple Silicon) | 3.12.14 | 198 geçti | 4/4 | kayıp 0, zaman aşımı 0 | 2.02 ms |
+| Yusuf | Windows 11 Pro (10.0.26200) | 3.13.5 (Anaconda) | 196 geçti, 6 atlandı | 3/4 (50 düğüm tcp, yukarıda) | kayıp 0, zaman aşımı 0 | 4.43 ms |
 
 ### Wire protokolü (v2, dondurulmuş)
 

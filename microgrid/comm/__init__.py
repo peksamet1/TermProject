@@ -55,8 +55,9 @@ One step ``t``, in this order
        are ``(requester, target, body)`` triples, ``handler(target, body)``
        returns the reply. Results come back in input order with
        ``reply is None`` for a timeout (``request_timeout_s``). A handler
-       that raises still answers, with ``error_reply(body, exc)``; pass one
-       that builds a NACK. ``PeerNode.send_request`` / ``collect_reply`` /
+       that raises still answers: with ``error_reply(body, exc)``, a keyword
+       parameter of ``negotiation_rounds`` that defaults to
+       ``default_error_reply``; pass one that builds a NACK. ``PeerNode.send_request`` / ``collect_reply`` /
        ``request`` exist, but one thread cannot wait on a REQ while also
        serving the target's REP, so the simulation uses this three-round
        drive.
