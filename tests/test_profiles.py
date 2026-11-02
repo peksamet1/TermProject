@@ -83,11 +83,11 @@ def test_consumption_always_positive(rng):
         assert profile.energy_at(step) > 0.0
 
 
-def test_consumption_daily_total_reasonable(rng):
-    """An average household should use roughly 5-25 kWh per day."""
+def test_consumption_daily_total_matches_turkish_average(rng):
+    """Default household uses ~200 kWh/month, i.e. ~6.6 kWh per day."""
     profile = make_consumption(rng)
     daily_kwh = sum(profile.energy_at(s) for s in range(STEPS_PER_DAY))
-    assert 5.0 <= daily_kwh <= 25.0
+    assert daily_kwh == pytest.approx(6.6, abs=0.3)
 
 
 def test_consumption_evening_peak_dominates(rng):
@@ -104,10 +104,47 @@ def test_consumption_scale(rng):
     assert large.energy_at(step) > small.energy_at(step)
 
 
+def daily_kwh(profile, day: int) -> float:
+    start = day * STEPS_PER_DAY
+    return sum(profile.energy_at(s) for s in range(start, start + STEPS_PER_DAY))
+
+
+def test_seasonal_solar_winter_below_summer(rng):
+    summer = make_solar(rng, start_day_of_year=172)  # 21 June
+    winter = make_solar(rng, start_day_of_year=355)  # 21 December
+    assert daily_kwh(winter, 0) < 0.4 * daily_kwh(summer, 0)
+
+
+def test_seasonal_solar_matches_monthly_table(rng):
+    """Expected daily yield (clear sky / mean cloud) follows the Istanbul table."""
+    from microgrid.profiles.solar import ISTANBUL_KWH_PER_KWP_DAY
+
+    july = make_solar(rng, peak_kw=1.0, start_day_of_year=196)
+    assert daily_kwh(july, 0) * 0.9 == pytest.approx(ISTANBUL_KWH_PER_KWP_DAY[6], rel=0.02)
+
+
+def test_seasonal_solar_days_get_shorter_after_solstice(rng):
+    solar = make_solar(rng, start_day_of_year=172)
+    first_light = lambda day: next(
+        s for s in range(day * STEPS_PER_DAY, (day + 1) * STEPS_PER_DAY)
+        if solar.energy_at(s) > 0
+    ) % STEPS_PER_DAY
+    assert first_light(120) > first_light(0)  # October sunrise is later
+
+
+def test_day_length_istanbul():
+    from microgrid.profiles.solar import day_length_hours
+
+    assert day_length_hours(172) == pytest.approx(15.0, abs=0.3)
+    assert day_length_hours(355) == pytest.approx(9.1, abs=0.3)
+
+
 def test_invalid_params_rejected(rng):
     with pytest.raises(ValueError):
         make_solar(rng, peak_kw=-1.0)
     with pytest.raises(ValueError):
         make_solar(rng, sunrise_hour=21.0, sunset_hour=6.0)
+    with pytest.raises(ValueError):
+        make_solar(rng, start_day_of_year=0)
     with pytest.raises(ValueError):
         make_consumption(rng, scale=0.0)

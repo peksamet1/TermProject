@@ -1,10 +1,13 @@
 """Headless simulation run: prints a daily summary and saves plots.
 
-Usage: python run.py
+Usage:
+    python run.py                                   # synthetic profiles
+    python run.py --profiles data/profiles_istanbul.csv [--start 2024-01-15] [--days 7]
 """
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import matplotlib
@@ -18,8 +21,23 @@ from microgrid.model import MicrogridModel
 RESULTS_DIR = Path(__file__).parent / "results"
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--profiles", help="profile CSV (timestamp, household_id, pv_kw, load_kw)")
+    parser.add_argument("--start", help="first timestamp to use from the CSV, e.g. 2024-01-15")
+    parser.add_argument("--days", type=int, help="number of simulated days")
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     config = SimulationConfig()
+    if args.profiles:
+        config.profile_source = "csv"
+        config.profile_csv_path = args.profiles
+        config.profile_start = args.start
+    if args.days:
+        config.num_days = args.days
     model = MicrogridModel(config=config)
     model.run()
 
@@ -30,6 +48,8 @@ def main() -> None:
           f"({config.step_hours * 60:.0f} min each)")
     print(f"Agents: {config.num_prosumers} prosumers, {config.num_consumers} consumers")
     print(f"Market backend: {config.market_backend}")
+    print(f"Profiles: {config.profile_source}"
+          + (f" ({config.profile_csv_path})" if config.profile_csv_path else ""))
     print()
     header = (f"{'Day':>3} | {'Gen kWh':>8} | {'Cons kWh':>8} | "
               f"{'Local kWh':>9} | {'Import kWh':>10} | {'Export kWh':>10} | "

@@ -41,6 +41,15 @@ class SimulationConfig:
     num_prosumers: int = 6
     num_consumers: int = 4
     pv_peak_kw: float = 5.0
+    # Day of year the simulation starts on (172 = 21 June). Drives the
+    # seasonal PV curve of the synthetic profiles.
+    start_day_of_year: int = 172
+    # Where household PV/load comes from:
+    # "synthetic" = built-in generators; "csv" = file in the common format
+    # (timestamp, household_id, pv_kw, load_kw), see microgrid.profiles.timeseries.
+    profile_source: str = "synthetic"
+    profile_csv_path: str | None = None
+    profile_start: str | None = None  # e.g. "2024-01-15": skip earlier CSV rows
     # "cda" = Continuous Double Auction (default); "logging" = no-P2P baseline
     market_backend: str = "cda"
     battery: BatteryConfig = field(default_factory=BatteryConfig)
