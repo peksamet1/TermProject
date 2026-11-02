@@ -16,7 +16,7 @@ Fazlar PSD 8.1'i izler; ayrıntılar Geliştirme Planı dokümanında.
 | 1 | Literatür, gereksinimler, tek kod tabanı, sabit veri yapıları | Tüm ekip | Tamamlandı |
 | 2 | Mesa ile ajan mantığı ve enerji profilleri | Erol | Çekirdek + veri hattı hazır (kalibre mock, CSV, Ausgrid/PVGIS); SoC'ye duyarlı strateji kaldı |
 | 3 | ZeroMQ P2P iletişim altyapısı | Kutluay | Tamamlandı; açık not: Windows'ta 50 düğüm tcp (aşağıda) |
-| 4 | CDA piyasa mekanizması (ZeroMQ üzerinden) | Yusuf | Süreç içi CDA hazır; `cda_zmq` kaldı |
+| 4 | CDA piyasa mekanizması (ZeroMQ üzerinden) | Yusuf | `cda_zmq` hazır: her düğümde CDA kopyası, TRADE/NACK onayı, grid fallback |
 | 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | Başlanmadı |
 | 6 | Veri analizi ve final dokümantasyon | Yusuf | Başlanmadı |
 
@@ -58,7 +58,8 @@ python run.py --profiles data/profiles_istanbul.csv --start 2013-01-15 --days 7
 python run.py --profiles data/sample/profiles_sample.csv --days 2   # küçük örnek dosya
 ```
 
-`market_backend`: varsayılan `"cda"`; baseline için `"logging"`.
+`market_backend`: varsayılan `"cda"` (süreç içi, panel bunu kullanır); asıl merkezsiz
+sistem `"cda_zmq"` (`python run.py --backend cda_zmq`); baseline `"logging"`.
 
 ## Mimari
 
@@ -70,8 +71,9 @@ microgrid/
 ├── profiles/        Sentetik PV + tüketim (İstanbul mevsimleri), CSV profilleri,
 │                    Ausgrid + PVGIS dönüştürücü (real_data.py)
 ├── market/
-│   ├── base.py      Order, MarketInterface (+ publish_status kancası), SettlementResult, LoggingMarket
-│   └── cda.py       CDAMarket, Trade (submit anında match, settle → grid)
+│   ├── base.py      Order, Trade, MarketInterface (publish_status, trades_at, close), SettlementResult, LoggingMarket
+│   ├── cda.py       CDAMarket (submit anında match, settle → grid)
+│   └── zmq_market.py ZmqMarket (cda_zmq): ZeroMQ üzerinden CDA kopyaları + TRADE/NACK
 └── comm/
     ├── __init__.py  Faz 4 sözleşmesi (docstring)
     ├── protocol.py  JSON wire şeması (STATUS/ORDER/TRADE/SETTLE/NACK), v2, dondurulmuş
@@ -97,6 +99,40 @@ yalnızca kendi aşamasına yazar, böylece paralel çalışmada çakışma olma
 - Kısmi dolum desteklenir.
 - Öncelik: alışta en yüksek / satışta en düşük fiyat; eşitlikte erken arrival.
 - `LoggingMarket` silinmedi (`market_backend="logging"`) — Phase 6 baseline.
+- Ödeme her backend'de aynı yoldan: yalnızca `trades_at(step)` işlemleri yerel
+  fiyattan ödenir, kalan alım perakende, kalan satış feed-in fiyatından.
+
+## Faz 4: merkezsiz CDA (`cda_zmq`)
+
+Merkezde piyasa düğümü yoktur; her ajanın bir `PeerNode`'u vardır
+(`microgrid/market/zmq_market.py`). Bir adım:
+
+1. `submit` ORDER'ı PUB-SUB ile yayar; `seq` adımın global gönderim sırasıdır
+   (Mesa aktivasyon sırası). `publish_status` her ajanın STATUS'unu yayar.
+2. `settle_step` adım bariyerini bekler, sonra her düğüm kendi ORDER'larını
+   `(seq, agent_id)` sırasıyla kendi `CDAMarket` kopyasına verir. Aynı girdi →
+   her kopyada aynı işlem listesi.
+3. Alıcı, kopyasındaki her işlemi REQ-REP ile satıcıya önerir (TRADE). Satıcı kendi
+   kopyasında aynı işlem varsa TRADE ile onaylar, yoksa NACK döner. Onaylanmayan
+   ya da zaman aşımına düşen hacim makro şebekeye gider (güvenli taraf).
+
+Kayıpsız bir koşuda `cda_zmq`, `cda` ile birebir aynı işlemleri ve aynı ajan
+bakiyelerini üretir (`test_zmq_market.py`). Bir düğüm ORDER kaçırırsa onun
+işlemleri NACK alır, enerji dengesi yine tutar. Model `close()` ile (veya
+`with MicrogridModel(...)`) soketleri kapatır; `comm_summary()` iletişim ve
+onay sayaçlarını verir.
+
+Ölçüm (Linux konteyner, 1 gün = 96 adım, seed 42, tek koşu):
+
+| Ajan | Taşıma | Süre | Bariyer p50 / p95 | Onay RTT p95 | Onaylanan / NACK / zaman aşımı | Kayıp |
+|---|---|---|---|---|---|---|
+| 10 | tcp | 0.6 sn | 2.6 / 4.5 ms | 1.7 ms | 175 / 0 / 0 | 0 |
+| 50 | inproc | 9.3 sn | 64.9 / 101.4 ms | 3.3 ms | 909 / 0 / 0 | 0 |
+
+Gerçek CDA doğrulamasıyla RTT, varsayılan 1 sn'lik `request_timeout_s`'in çok
+altında kalıyor. 50 düğüm tcp'de bu konteynerde el sıkışması 5 sn'de bitmedi
+(Windows notuyla aynı belirti); `handshake_timeout_s=60` ile 35.7 sn'de tamamlandı,
+yani engel değil yavaşlık.
 
 ## Faz 3: iletişim katmanı
 
@@ -337,6 +373,8 @@ SoC değil.
 - `test_comm_reqrep.py` — REQ-REP, üç tur, zaman aşımı, REQ havuzu
 - `test_comm_scale.py` — `CommStats` toplaması, p50/p95, 3/10 düğüm kayıpsızlık;
   30/50 düğüm `@pytest.mark.slow`
+- `test_zmq_market.py` — `cda_zmq` = `cda` (işlemler, bakiyeler), enerji dengesi,
+  STATUS içeriği, kaybolan ORDER → NACK + grid fallback, tekrarlanabilirlik, soket kapanışı
 
 İletişim testlerinde her bekleme bir son tarihe bağlı poll'dur; doğruluk hiçbir
 yerde "yeterince uzun" bir `sleep`'e bırakılmaz. Bozuk bir uygulama testi asmaz,
