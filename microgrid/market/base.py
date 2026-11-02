@@ -10,8 +10,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from microgrid.config import TariffConfig
+
+if TYPE_CHECKING:  # household.py imports this module
+    from microgrid.agents.household import HouseholdAgent
 
 
 class OrderSide(str, Enum):
@@ -51,6 +55,27 @@ class MarketInterface(ABC):
     @abstractmethod
     def orders_at(self, step: int) -> list[Order]:
         """Return all orders submitted during ``step``."""
+
+    def publish_status(self, agent: HouseholdAgent) -> None:
+        """Called by every agent at the end of its step, IDLE included.
+
+        A no-op for the in-process backends (``cda``, ``logging``). Phase 4's
+        ``ZmqMarket`` overrides it to broadcast the agent's STATUS: the step
+        barrier waits for N - 1 STATUSes every step (Architecture 4.3), and
+        this call is what guarantees one per agent.
+
+        An override reads only what the agent cached during its step:
+        ``generation_kwh``, ``consumption_kwh``, ``residual_kwh``,
+        ``state.value`` and ``soc``. It must never call ``energy_at()`` or
+        ``generation()``: synthetic profiles draw from the shared
+        ``model.rng``, so a second read returns a different value *and*
+        shifts every later agent's values (breaks same-seed reproducibility).
+
+        ``soc`` is read after the battery plan of this step has been applied.
+        It is not the start-of-step SoC the strategy decides on
+        (Architecture 4.2); analysis code must not read it as such.
+        """
+        del agent
 
 
 class LoggingMarket(MarketInterface):
