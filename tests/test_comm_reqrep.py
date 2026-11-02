@@ -90,7 +90,9 @@ def test_unserved_peer_times_out_without_hanging(comm_config):
         # would hang here for good.
         assert net[0].request(1, "anyone?", timeout_s=timeout_s) is None
         elapsed = time.perf_counter() - start
-        assert timeout_s <= elapsed < timeout_s + 0.5
+        # zmq.Poller measures its timeout on its own clock and can wake a
+        # fraction of a millisecond before perf_counter says it is due.
+        assert timeout_s - 0.005 <= elapsed < timeout_s + 0.5
         assert net[0].stats.timeouts == 1
         assert net[0].stats.replies == 0
         assert net[0].open_requests == 0
