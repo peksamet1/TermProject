@@ -16,7 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from microgrid.config import SimulationConfig
-from microgrid.model import MicrogridModel
+from microgrid.model import MARKET_BACKENDS, MicrogridModel
 
 RESULTS_DIR = Path(__file__).parent / "results"
 
@@ -26,6 +26,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profiles", help="profile CSV (timestamp, household_id, pv_kw, load_kw)")
     parser.add_argument("--start", help="first timestamp to use from the CSV, e.g. 2024-01-15")
     parser.add_argument("--days", type=int, help="number of simulated days")
+    parser.add_argument("--backend", choices=MARKET_BACKENDS,
+                        help="market backend (default: config, i.e. cda)")
     return parser.parse_args()
 
 
@@ -38,8 +40,13 @@ def main() -> None:
         config.profile_start = args.start
     if args.days:
         config.num_days = args.days
+    if args.backend:
+        config.market_backend = args.backend
     model = MicrogridModel(config=config)
-    model.run()
+    try:
+        model.run()
+    finally:
+        model.close()  # releases the ZeroMQ sockets of cda_zmq
 
     df = model.datacollector.get_model_vars_dataframe()
     df["Day"] = df.index // config.steps_per_day
@@ -71,8 +78,13 @@ def main() -> None:
     total_local = df["LocalTradedKwh"].sum()
     print(f"Total orders: {total_orders}")
     print(f"Total local P2P energy: {total_local:.1f} kWh")
-    if hasattr(model.market, "trades"):
-        print(f"Total trades: {len(model.market.trades)}")
+    total_trades = sum(len(model.market.trades_at(t)) for t in range(config.total_steps))
+    print(f"Total trades: {total_trades}")
+    if hasattr(model.market, "comm_summary"):
+        comm = model.market.comm_summary()
+        print(f"ZeroMQ: {comm['trades_confirmed']} confirmed, {comm['trades_nacked']} NACK, "
+              f"{comm['trades_timed_out']} timed out; lost STATUS {comm['status_loss']}, "
+              f"lost ORDER {comm['order_loss']}; barrier p95 {comm['barrier_p95_ms']:.1f} ms")
 
     RESULTS_DIR.mkdir(exist_ok=True)
     hours = df.index * config.step_hours

@@ -25,12 +25,20 @@ from microgrid.profiles.solar import SolarProfile
 from microgrid.profiles.timeseries import ProfileTable
 
 
-def _build_market(backend: str) -> MarketInterface:
+MARKET_BACKENDS = ("cda", "cda_zmq", "logging")
+
+
+def _build_market(backend: str, agent_ids: list[int], config: SimulationConfig) -> MarketInterface:
     if backend == "cda":
         return CDAMarket()
     if backend == "logging":
         return LoggingMarket()
-    raise ValueError(f"unknown market_backend {backend!r}; use 'cda' or 'logging'")
+    if backend == "cda_zmq":
+        # Imported here so the in-process backends never load pyzmq.
+        from microgrid.market.zmq_market import ZmqMarket
+
+        return ZmqMarket(agent_ids, config.comm)
+    raise ValueError(f"unknown market_backend {backend!r}; use one of {MARKET_BACKENDS}")
 
 
 class MicrogridModel(Model):
@@ -57,7 +65,8 @@ class MicrogridModel(Model):
         super().__init__(rng=seed)
 
         self.current_step = 0
-        self.market = _build_market(backend)
+        if backend not in MARKET_BACKENDS:
+            raise ValueError(f"unknown market_backend {backend!r}; use one of {MARKET_BACKENDS}")
         strategy = TradingStrategy(tariff=self.config.tariff)
         step_hours = self.config.step_hours
 
@@ -81,6 +90,11 @@ class MicrogridModel(Model):
                 consumption_profile=self._make_consumption_profile(num_prosumers + j),
                 strategy=strategy,
             )
+
+        # Built after the agents: cda_zmq needs one network node per agent id.
+        self.market = _build_market(
+            backend, [agent.unique_id for agent in self.agents], self.config
+        )
 
         self.total_generation_kwh = 0.0
         self.total_consumption_kwh = 0.0
@@ -249,6 +263,16 @@ class MicrogridModel(Model):
     def _collect(self) -> None:
         """Stage 4/4: record this step's data."""
         self.datacollector.collect(self)
+
+    def close(self) -> None:
+        """Release market resources (the ZeroMQ sockets of cda_zmq)."""
+        self.market.close()
+
+    def __enter__(self) -> "MicrogridModel":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
 
     def run(self, num_steps: int | None = None) -> None:
         num_steps = num_steps if num_steps is not None else self.config.total_steps
