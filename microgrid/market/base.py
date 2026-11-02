@@ -33,6 +33,17 @@ class Order:
 
 
 @dataclass(frozen=True)
+class Trade:
+    """A confirmed local P2P trade between one buyer and one seller."""
+
+    buyer_id: int
+    seller_id: int
+    quantity_kwh: float
+    price_tl_per_kwh: float
+    step: int
+
+
+@dataclass(frozen=True)
 class SettlementResult:
     """Per-step market settlement summary used by MicrogridModel metrics."""
 
@@ -55,6 +66,18 @@ class MarketInterface(ABC):
     @abstractmethod
     def orders_at(self, step: int) -> list[Order]:
         """Return all orders submitted during ``step``."""
+
+    def trades_at(self, step: int) -> list[Trade]:
+        """Confirmed local trades of ``step``, in book order.
+
+        Settlement pays exactly these; volume not covered by them goes to
+        the macro-grid. Empty for the no-P2P baseline.
+        """
+        del step
+        return []
+
+    def close(self) -> None:
+        """Release external resources (sockets). No-op for in-process backends."""
 
     def publish_status(self, agent: HouseholdAgent) -> None:
         """Called by every agent at the end of its step, IDLE included.

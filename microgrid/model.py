@@ -174,21 +174,21 @@ class MicrogridModel(Model):
         tariff = self.config.tariff
         matched_buy: dict[int, float] = {}
         matched_sell: dict[int, float] = {}
-        if isinstance(self.market, CDAMarket):
-            for trade in self.market.trades_at(settlement_step):
-                cost = trade.quantity_kwh * trade.price_tl_per_kwh
-                buyer = self._agent_by_id(trade.buyer_id)
-                seller = self._agent_by_id(trade.seller_id)
-                if buyer is not None:
-                    buyer.cash_tl -= cost
-                if seller is not None:
-                    seller.cash_tl += cost
-                matched_buy[trade.buyer_id] = (
-                    matched_buy.get(trade.buyer_id, 0.0) + trade.quantity_kwh
-                )
-                matched_sell[trade.seller_id] = (
-                    matched_sell.get(trade.seller_id, 0.0) + trade.quantity_kwh
-                )
+        # Same path for every backend: only confirmed trades are paid locally.
+        for trade in self.market.trades_at(settlement_step):
+            cost = trade.quantity_kwh * trade.price_tl_per_kwh
+            buyer = self._agent_by_id(trade.buyer_id)
+            seller = self._agent_by_id(trade.seller_id)
+            if buyer is not None:
+                buyer.cash_tl -= cost
+            if seller is not None:
+                seller.cash_tl += cost
+            matched_buy[trade.buyer_id] = (
+                matched_buy.get(trade.buyer_id, 0.0) + trade.quantity_kwh
+            )
+            matched_sell[trade.seller_id] = (
+                matched_sell.get(trade.seller_id, 0.0) + trade.quantity_kwh
+            )
 
         for agent in self.agents:
             buy_qty = max(0.0, -agent.residual_kwh)
