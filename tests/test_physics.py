@@ -86,7 +86,9 @@ def test_out_of_order_slot_is_a_sync_error():
 
 @pytest.mark.parametrize("backend", ["cda", "logging", "cda_zmq"])
 def test_model_physical_balance_and_clocks(backend):
-    """gen - cons - applied battery flow = export - import (+ dust, + shortfall).
+    """gen - cons - applied battery flow = export - import (+ dust).
+
+    Grid totals include the battery fallback, so a shortfall needs no slack.
 
     The battery ledger check catches a battery applied twice or not at all.
     """
@@ -106,7 +108,7 @@ def test_model_physical_balance_and_clocks(backend):
                        for a in model.agents)
             grid = model.grid_export_kwh - model.grid_import_kwh
             dust = 0.01 * len(model.agents)
-            assert abs(flow - grid) <= dust + model.battery_shortfall_kwh + 1e-9
+            assert abs(flow - grid) <= dust + 1e-9
 
             for agent in model.agents:
                 if agent.battery is None:
@@ -145,3 +147,40 @@ def test_clock_drift_is_detected():
         model.physics.env.run(until=model.physics.env.now + 1)  # SimPy runs ahead
         with pytest.raises(SyncError):
             model.step()
+
+
+def test_shortfall_falls_back_to_grid_and_is_paid():
+    """Heavy fade makes batteries fall short; that volume is exported at
+    feed-in (charge) or imported at retail (discharge), and the books close."""
+    config = SimulationConfig(market_backend="logging")  # no local trades
+    config.battery.fade_per_cycle = 0.02
+    tariff = config.tariff
+    with MicrogridModel(config=config) as model:
+        shortfall_seen = 0.0
+        for _ in range(config.steps_per_day):
+            cash_before = sum(a.cash_tl for a in model.agents)
+            model.step()
+            assert model.fallback_import_kwh + model.fallback_export_kwh == pytest.approx(
+                model.battery_shortfall_kwh, abs=1e-12
+            )
+            # Per-agent: the fallback goes the battery's planned direction.
+            charge_short = sum(a.battery_shortfall_kwh for a in model.agents
+                               if a.battery_flow_kwh > 0)
+            assert model.fallback_export_kwh == pytest.approx(charge_short, abs=1e-12)
+            # Cash closes: every grid kWh is paid at its tariff (dust aside).
+            paid = sum(a.cash_tl for a in model.agents) - cash_before
+            expected = (tariff.feed_in_tl_per_kwh * model.grid_export_kwh
+                        - tariff.retail_tl_per_kwh * model.grid_import_kwh)
+            dust = 0.01 * len(model.agents) * tariff.retail_tl_per_kwh
+            assert paid == pytest.approx(expected, abs=dust)
+            shortfall_seen += model.battery_shortfall_kwh
+        assert shortfall_seen > 0  # the scenario did exercise the fallback
+
+
+def test_no_fade_means_no_fallback():
+    config = SimulationConfig()
+    config.battery.fade_per_cycle = 0.0
+    with MicrogridModel(config=config) as model:
+        model.run(config.steps_per_day)
+        df = model.datacollector.get_model_vars_dataframe()
+        assert df["FallbackImport"].sum() == df["FallbackExport"].sum() == 0.0

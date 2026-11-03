@@ -14,8 +14,8 @@ with ``slot = 15`` for the default 96 steps per day.
 
 A plan the battery cannot fully apply (in practice only when fade shrinks the
 headroom inside the slot) is recorded as ``shortfall_kwh``; the agent already
-traded as if it were applied. Settling that shortfall with the grid is a
-later step (Architecture 4.5, grid fallback).
+traded as if it were applied, so ``MicrogridModel`` settles it with the
+macro-grid in a second cash pass (Architecture 4.5, PSD 6.4).
 """
 
 from __future__ import annotations
@@ -49,8 +49,10 @@ class BatterySlotResult:
 
     @property
     def shortfall_kwh(self) -> float:
-        """Planned but not applied (>= 0)."""
-        return max(0.0, abs(self.planned_kwh) - abs(self.applied_kwh))
+        """Planned but not applied (>= 0); float noise from splitting the
+        plan into minutes counts as fully applied."""
+        missing = abs(self.planned_kwh) - abs(self.applied_kwh)
+        return missing if missing > _EPS else 0.0
 
 
 @dataclass

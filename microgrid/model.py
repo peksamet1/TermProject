@@ -104,8 +104,11 @@ class MicrogridModel(Model):
 
         self.total_generation_kwh = 0.0
         self.total_consumption_kwh = 0.0
+        # Grid totals = market settlement + battery fallback (stage 3).
         self.grid_import_kwh = 0.0
         self.grid_export_kwh = 0.0
+        self.fallback_import_kwh = 0.0
+        self.fallback_export_kwh = 0.0
         self.local_traded_kwh = 0.0
         self.local_trade_count = 0
         self.avg_trade_price = math.nan
@@ -118,6 +121,8 @@ class MicrogridModel(Model):
                 "TotalConsumption": "total_consumption_kwh",
                 "GridImport": "grid_import_kwh",
                 "GridExport": "grid_export_kwh",
+                "FallbackImport": "fallback_import_kwh",
+                "FallbackExport": "fallback_export_kwh",
                 "LocalTradedKwh": "local_traded_kwh",
                 "LocalTradeCount": "local_trade_count",
                 "AvgTradePrice": "avg_trade_price",
@@ -287,6 +292,31 @@ class MicrogridModel(Model):
         self.battery_shortfall_kwh = report.shortfall_kwh
         self.battery_fade_loss_kwh = report.fade_loss_kwh
         self.constraint_violations = report.violations
+        self._apply_battery_fallback(with_battery)
+
+    def _apply_battery_fallback(self, with_battery: list[HouseholdAgent]) -> None:
+        """Second cash pass (PSD 6.4): a battery plan SimPy could not apply
+        falls back to the macro-grid. The agent traded as if it were applied:
+
+        - charge shortfall: surplus the battery did not take -> exported at
+          the feed-in tariff;
+        - discharge shortfall: deficit the battery did not cover -> imported
+          at the retail tariff.
+        """
+        tariff = self.config.tariff
+        self.fallback_import_kwh = self.fallback_export_kwh = 0.0
+        for agent in with_battery:
+            shortfall = agent.battery_shortfall_kwh
+            if shortfall <= 0:
+                continue
+            if agent.battery_flow_kwh > 0:
+                self.fallback_export_kwh += shortfall
+                agent.cash_tl += shortfall * tariff.feed_in_tl_per_kwh
+            else:
+                self.fallback_import_kwh += shortfall
+                agent.cash_tl -= shortfall * tariff.retail_tl_per_kwh
+        self.grid_import_kwh += self.fallback_import_kwh
+        self.grid_export_kwh += self.fallback_export_kwh
 
     def _collect(self) -> None:
         """Stage 4/4: record this step's data."""

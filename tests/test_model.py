@@ -11,6 +11,8 @@ from microgrid.agents.household import ConsumerAgent, ProsumerAgent
 from microgrid.config import SimulationConfig
 from microgrid.model import MicrogridModel
 
+from .conftest import market_grid_net
+
 
 def test_full_day_runs_without_errors(config):
     model = MicrogridModel(config=config)
@@ -43,7 +45,7 @@ def test_energy_conservation_each_step(config):
             for o in orders
         )
         assert order_net == pytest.approx(
-            model.grid_export_kwh - model.grid_import_kwh, abs=1e-9
+            market_grid_net(model), abs=1e-9
         )
         residual_sum = sum(
             a.generation_kwh - a.consumption_kwh - a.battery_flow_kwh

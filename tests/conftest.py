@@ -40,6 +40,14 @@ class ConstantProfile:
         return self.kwh
 
 
+def market_grid_net(model) -> float:
+    """Grid export - import settled by the market alone (battery fallback
+    from the physical slot excluded): what the step's orders must sum to."""
+    return (model.grid_export_kwh - model.fallback_export_kwh) - (
+        model.grid_import_kwh - model.fallback_import_kwh
+    )
+
+
 @pytest.fixture
 def rng() -> np.random.Generator:
     return np.random.default_rng(0)

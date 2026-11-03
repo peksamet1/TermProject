@@ -17,7 +17,7 @@ Fazlar PSD 8.1'i izler; ayrıntılar Geliştirme Planı dokümanında.
 | 2 | Mesa ile ajan mantığı ve enerji profilleri | Erol | Çekirdek + veri hattı hazır (kalibre mock, CSV, Ausgrid/PVGIS); SoC'ye duyarlı strateji kaldı |
 | 3 | ZeroMQ P2P iletişim altyapısı | Kutluay | Tamamlandı; açık not: Windows'ta 50 düğüm tcp (aşağıda) |
 | 4 | CDA piyasa mekanizması (ZeroMQ üzerinden) | Yusuf | `cda_zmq` hazır: her düğümde CDA kopyası, TRADE/NACK onayı, grid fallback |
-| 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | SimPy batarya fiziği hazır (plan/uygula, dakikalık slot, kapasite kaybı, saat kontrolü); grid fallback ve performans testleri kaldı |
+| 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | SimPy batarya fiziği ve grid fallback hazır (plan/uygula, dakikalık slot, kapasite kaybı, saat kontrolü); performans testleri kaldı |
 | 6 | Veri analizi ve final dokümantasyon | Yusuf | Başlanmadı |
 
 ## Kurulum ve Çalıştırma
@@ -110,10 +110,14 @@ Mesa karar verir, SimPy uygular (Mimari 4.5):
   tutmazsa ya da bir batarya süreci bitmezse `SyncError`.
 - Kısıt ihlali (bir dakikada SoC pencere dışı ya da güç sınırı aşımı) sayılır;
   `ConstraintViolations` 0 olmalı. DataCollector'a `BatteryShortfall`,
-  `BatteryFadeLoss`, `ConstraintViolations` ve ajan başına `BatteryApplied` eklendi.
-- Kapasite kaybı yüzünden slot içinde uygulanamayan plan `BatteryShortfall` olarak
-  kaydedilir; bunun şebekeye yazılıp ödenmesi (grid fallback) sonraki adım.
-  30 günlük koşuda toplamı ~0.001 kWh.
+  `BatteryFadeLoss`, `ConstraintViolations`, `FallbackImport`, `FallbackExport` ve
+  ajan başına `BatteryApplied` eklendi.
+- Grid fallback (PSD 6.4): kapasite kaybı yüzünden slot içinde uygulanamayan plan
+  (`BatteryShortfall`) makro şebekeye düşer ve ikinci bir nakit geçişiyle ödenir.
+  Dolmayan şarj → feed-in fiyatından export (`FallbackExport`), karşılanmayan deşarj
+  → perakende fiyatından import (`FallbackImport`). `GridImport` / `GridExport`
+  toplamdır (piyasa + fallback); bu yüzden üretim − tüketim − uygulanan batarya
+  akışı = export − import her adımda tutar. 30 günlük koşuda fallback ~0.001 kWh.
 
 Kapasite kaybı kapalıyken (`fade_per_cycle=0`) sonuçlar Faz 5 öncesiyle aynı
 (fark ≤ 1e-13, kayan nokta). Varsayılan ayarlarla 30 günlük koşu (yaz ve kış

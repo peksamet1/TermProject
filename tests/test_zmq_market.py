@@ -7,6 +7,8 @@ from microgrid.config import SimulationConfig
 from microgrid.market.base import OrderSide
 from microgrid.model import MicrogridModel
 
+from .conftest import market_grid_net
+
 STEPS = 48  # 00:00-12:00 covers the first trades of the day
 
 
@@ -52,7 +54,7 @@ def test_energy_balance_each_step():
                 o.quantity_kwh if o.side is OrderSide.SELL else -o.quantity_kwh for o in orders
             )
             assert order_net == pytest.approx(
-                model.grid_export_kwh - model.grid_import_kwh, abs=1e-9
+                market_grid_net(model), abs=1e-9
             )
 
 
@@ -98,7 +100,7 @@ def test_lost_orders_are_nacked_and_fall_back_to_grid(cda_run):
         order_net = sum(
             o.quantity_kwh if o.side is OrderSide.SELL else -o.quantity_kwh for o in orders
         )
-        assert order_net == pytest.approx(model.grid_export_kwh - model.grid_import_kwh, abs=1e-9)
+        assert order_net == pytest.approx(market_grid_net(model), abs=1e-9)
         # Earlier steps were untouched.
         earlier = [t for t in cda_run.market.trades if t.step < step]
         assert [t for t in model.market.trades if t.step < step] == earlier
