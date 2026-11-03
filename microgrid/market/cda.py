@@ -15,16 +15,10 @@ from microgrid.market.base import (
     Order,
     OrderSide,
     SettlementResult,
+    Trade,
 )
 
-
-@dataclass(frozen=True)
-class Trade:
-    buyer_id: int
-    seller_id: int
-    quantity_kwh: float
-    price_tl_per_kwh: float
-    step: int
+__all__ = ["BookOrder", "CDAMarket", "Trade"]
 
 
 @dataclass
