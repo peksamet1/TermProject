@@ -22,6 +22,11 @@ class BatteryConfig:
     soc_min: float = 0.10
     soc_max: float = 0.95
     initial_soc: float = 0.50
+    # Capacity fade per equivalent full cycle, as a fraction of the nominal
+    # capacity (one full cycle = 2 x nominal capacity of throughput).
+    # Assumption: ~20% fade after ~4,000 cycles, typical of home Li-ion (LFP)
+    # storage warranties -> 0.2 / 4000 = 5e-5. 0 disables degradation.
+    fade_per_cycle: float = 5e-5
 
 
 @dataclass

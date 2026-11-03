@@ -147,7 +147,7 @@ Veri yapıları mevcut kodda tanımlı; yeni olan yalnızca profil CSV'si ve bir
 | Order | agent\_id, side (BUY/SELL), quantity\_kwh, price\_tl\_per\_kwh, step | `market/base.py` (mevcut) |
 | Trade | buyer\_id, seller\_id, quantity\_kwh, price\_tl\_per\_kwh, step | `market/cda.py` (mevcut) |
 | SettlementResult | grid\_import\_kwh, grid\_export\_kwh, local\_traded\_kwh, trade\_count, avg\_trade\_price | `market/base.py` (mevcut) |
-| Battery | capacity\_kwh, enerji, soc, soc\_min/soc\_max, güç sınırları, verim; eklenecek: degradation katsayısı | `agents/battery.py`, `config.py` |
+| Battery | capacity\_kwh, enerji, soc, soc\_min/soc\_max, güç sınırları, verim; degradation katsayısı (`fade_per_cycle`) | `agents/battery.py`, `config.py` |
 | Profil CSV | timestamp (15 dk), household\_id, pv\_kw, load\_kw | `data/*.csv` (yeni) |
 
 Mesajlar UTF-8 JSON'dur (`comm/protocol.py`, mevcut). Her mesajın zarfı: `type`, `v`, `msg_id`, `sender_id`, `step`, `corr_id`, `topic`. Eklenecek alanlar: tüm mesajlara `sent_at` (gecikme ölçümü), ORDER'a `seq` (gönderim sırası). Çözücü bilinmeyen alanları sessizce atıyor; bu yüzden ikisi gerçek dataclass alanı olarak eklenir ve protokol sürümü 2'ye çıkar.
@@ -199,7 +199,7 @@ requirements.txt
 | Dil | Python 3.x | Mesa 3.5 için en az 3.12 |
 | Ajan tabanlı modelleme | Mesa 3 | `mesa[viz]~=3.5` (mevcut) |
 | İletişim | ZeroMQ | `pyzmq` (eklenecek) |
-| Ayrık olaylı simülasyon | SimPy | `simpy` 4 (eklenecek) |
+| Ayrık olaylı simülasyon | SimPy | `simpy` 4 |
 | Veri | Pandas, NumPy | mevcut |
 | Görselleştirme | Matplotlib, Plotly | `plotly` eklenecek |
 | Sürüm kontrolü | Git, GitHub | `peksamet1/TermProject` |
