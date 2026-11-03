@@ -95,3 +95,56 @@ def test_from_config():
     assert battery.soc == pytest.approx(0.50)
     assert battery.capacity_kwh == pytest.approx(10.0)
     assert not math.isnan(battery.soc)
+
+
+# --- Phase 5: plan / apply split, durations, capacity fade ---------------
+
+
+def test_plan_does_not_change_state_and_matches_apply():
+    battery = make_battery()
+    energy = battery.energy_kwh
+    planned_in = battery.plan_charge(2.0)
+    planned_out = battery.plan_discharge(2.0)
+    assert battery.energy_kwh == energy  # planning has no side effect
+    assert battery.charge(2.0) == pytest.approx(planned_in)
+    battery = make_battery()
+    assert battery.discharge(2.0) == pytest.approx(planned_out)
+
+
+def test_duration_sets_the_power_limit():
+    battery = make_battery()
+    one_minute = 1 / 60
+    # 5 kW for one minute = 0.0833 kWh
+    assert battery.plan_charge(1.0, one_minute) == pytest.approx(5.0 / 60)
+    assert battery.discharge(1.0, one_minute) == pytest.approx(5.0 / 60)
+
+
+def test_fade_shrinks_capacity_per_cycle():
+    battery = make_battery(fade_per_cycle=0.01)
+    # One full cycle = 2 x 10 kWh of throughput -> 1% of nominal capacity.
+    battery.apply_fade(20.0)
+    assert battery.capacity_kwh == pytest.approx(9.9)
+    assert battery.nominal_capacity_kwh == 10.0
+
+
+def test_fade_clips_energy_above_soc_max_as_loss():
+    battery = make_battery(initial_soc=0.95, fade_per_cycle=0.01)
+    lost = battery.apply_fade(20.0)
+    assert lost == pytest.approx(0.95 * 0.1)
+    assert battery.soc == pytest.approx(0.95)
+    assert battery.fade_loss_kwh == pytest.approx(lost)
+
+
+def test_no_fade_by_default_and_invalid_fade_rejected():
+    battery = make_battery()
+    assert battery.apply_fade(100.0) == 0.0
+    assert battery.capacity_kwh == 10.0
+    with pytest.raises(ValueError):
+        make_battery(fade_per_cycle=-0.1)
+    with pytest.raises(ValueError):
+        battery.apply_fade(-1.0)
+
+
+def test_from_config_carries_fade():
+    battery = Battery.from_config(BatteryConfig(fade_per_cycle=1e-4), STEP_HOURS)
+    assert battery.fade_per_cycle == 1e-4
