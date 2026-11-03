@@ -17,7 +17,7 @@ Fazlar PSD 8.1'i izler; ayrıntılar Geliştirme Planı dokümanında.
 | 2 | Mesa ile ajan mantığı ve enerji profilleri | Erol | Çekirdek + veri hattı hazır (kalibre mock, CSV, Ausgrid/PVGIS); SoC'ye duyarlı strateji kaldı |
 | 3 | ZeroMQ P2P iletişim altyapısı | Kutluay | Tamamlandı; açık not: Windows'ta 50 düğüm tcp (aşağıda) |
 | 4 | CDA piyasa mekanizması (ZeroMQ üzerinden) | Yusuf | `cda_zmq` hazır: her düğümde CDA kopyası, TRADE/NACK onayı, grid fallback |
-| 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | Başlanmadı |
+| 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | SimPy batarya fiziği hazır (plan/uygula, dakikalık slot, kapasite kaybı, saat kontrolü); grid fallback ve performans testleri kaldı |
 | 6 | Veri analizi ve final dokümantasyon | Yusuf | Başlanmadı |
 
 ## Kurulum ve Çalıştırma
@@ -67,6 +67,7 @@ sistem `"cda_zmq"` (`python run.py --backend cda_zmq`); baseline `"logging"`.
 microgrid/
 ├── config.py        SimulationConfig (market_backend dahil)
 ├── model.py         MicrogridModel + DataCollector + cash_tl settlement
+├── physics.py       PhysicalSimulator: SimPy slotu, batarya planlarını dakikalık uygular
 ├── agents/          HouseholdAgent, Battery, TradingStrategy (Phase 2; 4a'da aynı)
 ├── profiles/        Sentetik PV + tüketim (İstanbul mevsimleri), CSV profilleri,
 │                    Ausgrid + PVGIS dönüştürücü (real_data.py)
@@ -90,8 +91,33 @@ yalnızca kendi aşamasına yazar, böylece paralel çalışmada çakışma olma
    her `submit` CDA order book'ta anında eşleşmeyi dener (midpoint fiyat). (Faz 2)
 2. `_market_settle()` — `settle_step` kalan BUY/SELL'i makro-gride yazar, book
    temizlenir; `cash_tl` local trade + grid fallback ile güncellenir. (Faz 4)
-3. `_physics_slot()` — SimPy batarya simülasyonu; şimdilik boş. (Faz 5)
+3. `_physics_slot()` — SimPy, ajanların batarya planlarını dakika dakika uygular. (Faz 5)
 4. `_collect()` — DataCollector kaydeder.
+
+## Faz 5: SimPy batarya fiziği
+
+Mesa karar verir, SimPy uygular (Mimari 4.5):
+
+- Ajan adımında batarya yalnızca **planlanır** (`plan_charge` / `plan_discharge`,
+  durumu değiştirmez); kalan residual piyasaya gider. Ajanın gördüğü ve STATUS'ta
+  yayınlanan SoC adım başı SoC'sidir.
+- Piyasadan sonra `PhysicalSimulator.run_slot(t)` SimPy'de 15 dakikalık slotu
+  çalıştırır: her batarya için bir süreç planı 1 dakikalık alt adımlarla uygular
+  (`charge` / `discharge` süre parametresiyle), dakikalık güç sınırını ve SoC
+  penceresini zorlar, taşınan enerji kadar kapasite kaybı (`apply_fade`) uygular.
+  Kapasite azalınca soc_max üstünde kalan enerji kırpılır ve kayıp olarak yazılır.
+- Her adımda iki saat kontrol edilir: slot sonunda `env.now == model.time × 15`;
+  tutmazsa ya da bir batarya süreci bitmezse `SyncError`.
+- Kısıt ihlali (bir dakikada SoC pencere dışı ya da güç sınırı aşımı) sayılır;
+  `ConstraintViolations` 0 olmalı. DataCollector'a `BatteryShortfall`,
+  `BatteryFadeLoss`, `ConstraintViolations` ve ajan başına `BatteryApplied` eklendi.
+- Kapasite kaybı yüzünden slot içinde uygulanamayan plan `BatteryShortfall` olarak
+  kaydedilir; bunun şebekeye yazılıp ödenmesi (grid fallback) sonraki adım.
+  30 günlük koşuda toplamı ~0.001 kWh.
+
+Kapasite kaybı kapalıyken (`fade_per_cycle=0`) sonuçlar Faz 5 öncesiyle aynı
+(fark ≤ 1e-13, kayan nokta). Varsayılan ayarlarla 30 günlük koşu (yaz ve kış
+başlangıcı) hatasız bitti, kısıt ihlali 0; 10 ajanda SimPy adım süresine ~%30 ekliyor.
 
 ## CDA kuralları
 
@@ -351,6 +377,7 @@ SoC değil.
 | Enerji | kWh/adım | — |
 | Güç | kW | PV tepe 5 kW, batarya 5 kW |
 | SoC | [0, 1] | [0.10, 0.95], başlangıç 0.50 |
+| Kapasite kaybı | döngü başına, nominalin oranı | `fade_per_cycle=5e-5` (~4.000 döngüde %20, varsayım) |
 | Fiyat | TL/kWh | feed-in 1.20, perakende 3.50 |
 | Tüketim | kWh/gün | ~6.6 (≈200 kWh/ay, Türkiye ortalaması) |
 | Başlangıç günü | yılın günü | `start_day_of_year=172` (21 Haziran) |
@@ -359,7 +386,9 @@ SoC değil.
 
 ## Test Stratejisi
 
-- `test_battery.py`, `test_profiles.py`, `test_agents.py` — Phase 2
+- `test_battery.py`, `test_profiles.py`, `test_agents.py` — Phase 2 (+ Faz 5: plan/uygula, süre, kapasite kaybı)
+- `test_physics.py` — dakikalık slot, sınırlar, kısıt ihlali 0, fiziksel enerji dengesi ve batarya defteri
+  (çift uygulamayı yakalar), Mesa-SimPy saat kontrolü; üç backend'de
 - `test_timeseries.py` — CSV okuma, i mod k eşleme, başa sarma, hatalı veri, iki kaynakla enerji korunumu
 - `test_real_data.py` — sahte Ausgrid/PVGIS dosyalarıyla dönüşüm (30→15 dk enerji korunur, ölçek, mevsim kaydırma)
 - `test_protocol.py` — JSON round-trip, zarf, bozuk mesaj, sürüm, v2 alanları (`sent_at`, `seq`, `sender_id`)
