@@ -114,6 +114,8 @@ def test_battery_charged_before_selling(strategy):
 
     assert agent.battery_flow_kwh == pytest.approx(1.25)
     assert agent.residual_kwh == pytest.approx(0.75)
+    # The agent only plans: SimPy applies the flow in the physical slot.
+    assert battery.soc == pytest.approx(0.5)
     order = model.market.orders[0]
     assert order.side is OrderSide.SELL
     assert order.quantity_kwh == pytest.approx(0.75)
@@ -128,6 +130,7 @@ def test_battery_discharged_before_buying(strategy):
     agent.step()
 
     assert agent.battery_flow_kwh == pytest.approx(-1.25)
+    assert battery.soc == pytest.approx(0.5)  # planned, not applied yet
     order = model.market.orders[0]
     assert order.side is OrderSide.BUY
     assert order.quantity_kwh == pytest.approx(0.75)
