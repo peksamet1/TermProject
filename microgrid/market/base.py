@@ -94,9 +94,10 @@ class MarketInterface(ABC):
         ``model.rng``, so a second read returns a different value *and*
         shifts every later agent's values (breaks same-seed reproducibility).
 
-        ``soc`` is read after the battery plan of this step has been applied.
-        It is not the start-of-step SoC the strategy decides on
-        (Architecture 4.2); analysis code must not read it as such.
+        ``soc`` is the start-of-step SoC: since Phase 5 the agent only plans
+        its battery flow and SimPy applies it after the market (stage 3), so
+        it is the same SoC the agent's decision was based on. The end-of-step
+        SoC is what the DataCollector records.
         """
         del agent
 

@@ -145,7 +145,7 @@ def generate_synthetic_csv(
             step_hours=step_hours,
             steps_per_day=steps_per_day,
             rng=rng,
-            start_day_of_year=min(start.dayofyear, 365),
+            start_day_of_year=min(start.day_of_year, 365),
         )
         load = ConsumptionProfile(
             step_hours=step_hours,

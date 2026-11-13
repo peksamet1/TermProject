@@ -129,7 +129,7 @@ def pv_to_15min(pv_hourly: pd.Series) -> pd.Series:
 
 def pv_lookup(pv_15min: pd.Series, timestamps: pd.Series) -> np.ndarray:
     """PV for any timestamp by (day of year, time of day) of the PVGIS year."""
-    key = lambda ts: ts.dt.dayofyear.clip(upper=365) * 1440 + ts.dt.hour * 60 + ts.dt.minute
+    key = lambda ts: ts.dt.day_of_year.clip(upper=365) * 1440 + ts.dt.hour * 60 + ts.dt.minute
     table = pd.Series(pv_15min.to_numpy(), index=key(pv_15min.index.to_series()))
     table = table[~table.index.duplicated()]
     return table.reindex(key(timestamps)).fillna(0.0).to_numpy()

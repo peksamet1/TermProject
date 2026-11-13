@@ -19,6 +19,7 @@ from microgrid.agents.strategy import TradingStrategy
 from microgrid.config import SimulationConfig
 from microgrid.market.base import LoggingMarket, MarketInterface, OrderSide
 from microgrid.market.cda import CDAMarket
+from microgrid.physics import PhysicalSimulator, SyncError
 from microgrid.profiles.base import EnergyProfile
 from microgrid.profiles.consumption import ConsumptionProfile
 from microgrid.profiles.solar import SolarProfile
@@ -96,10 +97,18 @@ class MicrogridModel(Model):
             backend, [agent.unique_id for agent in self.agents], self.config
         )
 
+        self.physics = PhysicalSimulator(step_hours=step_hours)
+        self.battery_shortfall_kwh = 0.0
+        self.battery_fade_loss_kwh = 0.0
+        self.constraint_violations = 0
+
         self.total_generation_kwh = 0.0
         self.total_consumption_kwh = 0.0
+        # Grid totals = market settlement + battery fallback (stage 3).
         self.grid_import_kwh = 0.0
         self.grid_export_kwh = 0.0
+        self.fallback_import_kwh = 0.0
+        self.fallback_export_kwh = 0.0
         self.local_traded_kwh = 0.0
         self.local_trade_count = 0
         self.avg_trade_price = math.nan
@@ -112,17 +121,23 @@ class MicrogridModel(Model):
                 "TotalConsumption": "total_consumption_kwh",
                 "GridImport": "grid_import_kwh",
                 "GridExport": "grid_export_kwh",
+                "FallbackImport": "fallback_import_kwh",
+                "FallbackExport": "fallback_export_kwh",
                 "LocalTradedKwh": "local_traded_kwh",
                 "LocalTradeCount": "local_trade_count",
                 "AvgTradePrice": "avg_trade_price",
                 "BuyOrders": "buy_orders",
                 "SellOrders": "sell_orders",
                 "AvgProsumerSoC": self._avg_prosumer_soc,
+                "BatteryShortfall": "battery_shortfall_kwh",
+                "BatteryFadeLoss": "battery_fade_loss_kwh",
+                "ConstraintViolations": "constraint_violations",
             },
             agent_reporters={
                 "Generation": "generation_kwh",
                 "Consumption": "consumption_kwh",
                 "BatteryFlow": "battery_flow_kwh",
+                "BatteryApplied": "battery_applied_kwh",
                 "Residual": "residual_kwh",
                 "BuyOrder": lambda a: max(0.0, -a.residual_kwh),
                 "SellOrder": lambda a: max(0.0, a.residual_kwh),
@@ -255,10 +270,53 @@ class MicrogridModel(Model):
         self.sell_orders = sum(1 for o in step_orders if o.side is OrderSide.SELL)
 
     def _physics_slot(self) -> None:
-        """Stage 3/4: physical battery simulation with SimPy.
+        """Stage 3/4: SimPy applies every battery plan of this step minute
+        by minute (all backends, the no-P2P baseline included)."""
+        with_battery = sorted(
+            (a for a in self.agents if a.battery is not None), key=lambda a: a.unique_id
+        )
+        report = self.physics.run_slot(self.current_step, with_battery)
+        # Two independent clocks: Mesa advances ``time`` at the start of
+        # step(), so after slot t both must sit at (t + 1) slots.
+        if self.physics.env.now != self.time * self.physics.slot_minutes:
+            raise SyncError(
+                f"SimPy at minute {self.physics.env.now}, Mesa time {self.time}"
+            )
+        results = {r.agent_id: r for r in report.batteries}
+        for agent in with_battery:
+            agent.battery_applied_kwh = results[agent.unique_id].applied_kwh
+            agent.battery_shortfall_kwh = results[agent.unique_id].shortfall_kwh
+        for agent in self.agents:
+            if agent.battery is None:
+                agent.battery_applied_kwh = agent.battery_shortfall_kwh = 0.0
+        self.battery_shortfall_kwh = report.shortfall_kwh
+        self.battery_fade_loss_kwh = report.fade_loss_kwh
+        self.constraint_violations = report.violations
+        self._apply_battery_fallback(with_battery)
 
-        Empty for now; Phase 5 adds PhysicalSimulator.run_slot() here.
+    def _apply_battery_fallback(self, with_battery: list[HouseholdAgent]) -> None:
+        """Second cash pass (PSD 6.4): a battery plan SimPy could not apply
+        falls back to the macro-grid. The agent traded as if it were applied:
+
+        - charge shortfall: surplus the battery did not take -> exported at
+          the feed-in tariff;
+        - discharge shortfall: deficit the battery did not cover -> imported
+          at the retail tariff.
         """
+        tariff = self.config.tariff
+        self.fallback_import_kwh = self.fallback_export_kwh = 0.0
+        for agent in with_battery:
+            shortfall = agent.battery_shortfall_kwh
+            if shortfall <= 0:
+                continue
+            if agent.battery_flow_kwh > 0:
+                self.fallback_export_kwh += shortfall
+                agent.cash_tl += shortfall * tariff.feed_in_tl_per_kwh
+            else:
+                self.fallback_import_kwh += shortfall
+                agent.cash_tl -= shortfall * tariff.retail_tl_per_kwh
+        self.grid_import_kwh += self.fallback_import_kwh
+        self.grid_export_kwh += self.fallback_export_kwh
 
     def _collect(self) -> None:
         """Stage 4/4: record this step's data."""
