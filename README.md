@@ -17,7 +17,7 @@ Fazlar PSD 8.1'i izler; ayrıntılar Geliştirme Planı dokümanında.
 | 2 | Mesa ile ajan mantığı ve enerji profilleri | Erol | Çekirdek + veri hattı hazır (kalibre mock, CSV, Ausgrid/PVGIS); SoC'ye duyarlı strateji kaldı |
 | 3 | ZeroMQ P2P iletişim altyapısı | Kutluay | Tamamlandı; açık not: Windows'ta 50 düğüm tcp (aşağıda) |
 | 4 | CDA piyasa mekanizması (ZeroMQ üzerinden) | Yusuf | `cda_zmq` hazır: her düğümde CDA kopyası, TRADE/NACK onayı, grid fallback |
-| 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | SimPy batarya fiziği ve grid fallback hazır (plan/uygula, dakikalık slot, kapasite kaybı, saat kontrolü); performans testleri kaldı |
+| 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | Tamamlandı: SimPy batarya fiziği, grid fallback, KPI'lar (`metrics.py`) ve 10/30/50 ajan performans deneyi |
 | 6 | Veri analizi ve final dokümantasyon | Yusuf | Başlanmadı |
 
 ## Kurulum ve Çalıştırma
@@ -39,8 +39,9 @@ solara run app.py      # etkileşimli SolaraViz paneli
                        #   Page 1: SoC, emirler, local trade hacmi/fiyat
                        #   Page 2: hane bazli generation/consumption + orders
 pytest                 # test paketi (30/50 düğümlü koşular hariç)
-pytest -m slow         # 30/50 düğümlü iletişim koşuları (~30 sn)
+pytest -m slow         # 30/50 düğüm/ajan koşuları (~1-2 dk)
 python -m experiments.comm_scale   # iletişim ölçek deneyi -> results/comm_scale.*
+python -m experiments.perf_scale   # tüm simülasyon, 10/30/50 ajan -> results/perf_scale.*
 ```
 
 macOS / Linux'ta etkinleştirme `source .venv/bin/activate`, ortam değişkeni
@@ -68,6 +69,7 @@ microgrid/
 ├── config.py        SimulationConfig (market_backend dahil)
 ├── model.py         MicrogridModel + DataCollector + cash_tl settlement
 ├── physics.py       PhysicalSimulator: SimPy slotu, batarya planlarını dakikalık uygular
+├── metrics.py       KPI'lar (şebeke bağımlılığı, işlem başarı oranı, maliyet) + adım süresi ölçümü
 ├── agents/          HouseholdAgent, Battery, TradingStrategy (Phase 2; 4a'da aynı)
 ├── profiles/        Sentetik PV + tüketim (İstanbul mevsimleri), CSV profilleri,
 │                    Ausgrid + PVGIS dönüştürücü (real_data.py)
@@ -81,7 +83,8 @@ microgrid/
     ├── node.py      PeerNode, CommStats
     └── network.py   PeerNetwork: kurulum, el sıkışması, bariyer, REQ-REP turları
 experiments/
-└── comm_scale.py    3/10/30/50 düğüm iletişim ölçek deneyi
+├── comm_scale.py    3/10/30/50 düğüm iletişim ölçek deneyi
+└── perf_scale.py    10/30/50 ajan × 3 backend performans deneyi (Faz 5)
 ```
 
 Her 15 dakikalık adım (`MicrogridModel.step()`) dört aşamadan oluşur. Her faz
@@ -121,7 +124,76 @@ Mesa karar verir, SimPy uygular (Mimari 4.5):
 
 Kapasite kaybı kapalıyken (`fade_per_cycle=0`) sonuçlar Faz 5 öncesiyle aynı
 (fark ≤ 1e-13, kayan nokta). Varsayılan ayarlarla 30 günlük koşu (yaz ve kış
-başlangıcı) hatasız bitti, kısıt ihlali 0; 10 ajanda SimPy adım süresine ~%30 ekliyor.
+başlangıcı) hatasız bitti, kısıt ihlali 0. SimPy'nin adım süresindeki payı aşağıda.
+
+### Performans testleri
+
+`experiments/perf_scale.py` tüm simülasyonu (Mesa + piyasa + SimPy) 10, 30 ve 50
+ajanla, üç backend için aynı seed ve aynı profillerle koşturur. KPI'lar
+`microgrid/metrics.py`'de, DataCollector çıktısından hesaplanır (Mimari 8);
+Faz 6 aynı fonksiyonları kullanır.
+
+```
+python -m experiments.perf_scale                        # results/perf_scale.csv + .png
+python -m experiments.perf_scale --profiles data/profiles_istanbul.csv --start 2013-01-15
+```
+
+Koşul: 3 gün (288 adım, 21 Haziran'dan), seed 42, sentetik profiller, %60
+prosumer / %40 consumer; Linux 6.18 x86_64 (4 çekirdek), Python 3.13.18, Mesa
+3.5.2, SimPy 4.1.2, pyzmq 27.3.0, libzmq 4.3.5; her hücre tek koşu. `cda_zmq`
+30 ajana kadar tcp, üstünde `inproc` kullanır (`--transport auto`): bu makinede
+50 düğüm tcp el sıkışması 5 sn'de bitmedi (bkz. "Bilinen sınırlar"); yalnızca
+adres değişir, protokol aynıdır.
+
+**Hız: adım süresi ve aşamalara dağılımı (p50, ms)**
+
+| N | backend | adım p50 / p95 | ajan | piyasa | SimPy | veri toplama |
+|---|---|---|---|---|---|---|
+| 10 | logging | 0.38 / 0.50 | 0.09 | 0.05 | 0.19 | 0.04 |
+| 10 | cda | 0.38 / 0.51 | 0.11 | 0.04 | 0.19 | 0.04 |
+| 10 | cda_zmq (tcp) | 5.32 / 8.65 | 0.91 | 3.65 | 0.24 | 0.07 |
+| 30 | logging | 1.12 / 1.86 | 0.24 | 0.15 | 0.61 | 0.11 |
+| 30 | cda | 1.50 / 2.03 | 0.41 | 0.15 | 0.76 | 0.15 |
+| 30 | cda_zmq (tcp) | 44.26 / 65.06 | 3.22 | 40.16 | 0.75 | 0.15 |
+| 50 | logging | 1.71 / 2.49 | 0.37 | 0.26 | 0.96 | 0.15 |
+| 50 | cda | 1.98 / 2.78 | 0.61 | 0.21 | 0.99 | 0.15 |
+| 50 | cda_zmq (inproc) | 98.00 / 158.80 | 5.78 | 90.19 | 1.15 | 0.20 |
+
+- `cda_zmq`'da sürenin %70-92'si piyasa aşamasında: bariyer (STATUS ve ORDER'ların
+  herkese ulaşması) ve TRADE/NACK onay turları. Ajan aşaması da yayın yaptığı için
+  büyür. SimPy 50 ajanda bile ~1 ms; süreç içi backend'lerde adımın yaklaşık
+  yarısı, `cda_zmq`'da %5'in altında.
+- 50 ajanda adım p95'i 159 ms: 15 dakikalık bir adım için gerçek zamanın çok
+  altında. 3 günlük 50 ajan koşusu ~30 sn sürüyor.
+
+**Doğruluk:** dokuz koşunun hepsinde kısıt ihlali 0, adım başına enerji dengesi
+hatası ≤ 7e-15 kWh (kayan nokta), Mesa-SimPy saati hiç ayrışmadı (`SyncError`
+yok). `cda_zmq` her N'de `cda` ile aynı işlem sayısını, aynı yerel hacmi ve aynı
+faturaları verdi (`same_as_cda`). İletişimde kayıp, zaman aşımı, NACK ve geç
+mesaj 0; önerilen her işlem onaylandı.
+
+**P2P'nin faydası (baseline = `logging`, aynı N)**
+
+| N | şebeke bağımlılığı baseline → P2P | azalma | işlem başarı oranı | talep karşılama | topluluk faturası baseline → P2P (TL) | tasarruf (TL) |
+|---|---|---|---|---|---|---|
+| 10 | %37.5 → %24.3 | %35.3 | 0.116 | 0.353 | −209.1 → −274.0 | 64.8 |
+| 30 | %39.5 → %24.7 | %37.5 | 0.116 | 0.375 | −721.3 → −925.3 | 204.0 |
+| 50 | %39.3 → %24.5 | %37.6 | 0.115 | 0.376 | −1217.7 → −1550.1 | 332.5 |
+
+- Şebeke bağımlılığı = şebekeden alım / toplam tüketim. Fatura negatif: Haziran'da
+  topluluk şebekeye sattığından fazla kazanıyor; P2P bu kazancı artırıyor.
+- İşlem başarı oranı = yerelde karşılanan emir hacmi / toplam emir hacmi (her
+  yerel kWh bir alış ve bir satış emrini doldurur). Yazın satış hacmi alışın ~5
+  katı olduğu için oran düşük; talep karşılama (yerel kWh / alış emri hacmi)
+  hanelerin şebekeye kalan talebinin ~%37'sinin komşulardan geldiğini gösteriyor.
+- Gecikme (`cda_zmq`, p50 / p95 ms): PUB-SUB 1.81 / 3.70 (10, tcp), 20.89 / 38.21
+  (30, tcp), 38.82 / 87.61 (50, inproc); onay RTT 0.62 / 1.38, 1.83 / 3.49,
+  1.58 / 3.65; bariyer 2.77 / 4.28, 33.47 / 48.25, 73.33 / 113.51.
+- Fallback 3 günde ≤ 0.0006 kWh (hepsi export), kapasite kaybı ≤ 4e-5 kWh.
+
+Rakamlar tek makinede tek koşudur; mutlak süreler makineye göre değişir,
+oranlar ve doğruluk sonuçları değişmez. Gerçek veri geldiğinde aynı deney
+`--profiles` ile koşar.
 
 ## CDA kuralları
 
@@ -309,7 +381,9 @@ yaklaşık bir TIME_WAIT bırakır.
   seferinde farklı düğümler eksik). Aynı makinede 30 düğüm tcp ve 50 düğüm
   `inproc` geçti. Yavaşlık mı, Windows'a özgü bir engel mi olduğu, Durum
   Raporu'nda yazılı tanı komutuyla ileride netleşecek. O zamana kadar
-  Windows'ta 30 düğümün üstünde `transport="inproc"` kullanın. İlgili test
+  Windows'ta 30 düğümün üstünde `transport="inproc"` kullanın. Faz 5 performans
+  deneyinde (Linux x86_64, 4 çekirdek) 50 düğüm tcp el sıkışması da 5 sn'de
+  bitmedi; `perf_scale` bu yüzden 30'un üstünde `inproc` kullanır. İlgili test
   (`test_large_mesh_is_lossless[50-tcp]`) yalnızca Windows'ta `xfail` olarak
   işaretli; macOS ve Linux'ta normal koşar.
 - **Windows'ta `resource` modülü yok**, bu yüzden dosya limiti yükseltilemez ve
@@ -408,6 +482,10 @@ SoC değil.
   30/50 düğüm `@pytest.mark.slow`
 - `test_zmq_market.py` — `cda_zmq` = `cda` (işlemler, bakiyeler), enerji dengesi,
   STATUS içeriği, kaybolan ORDER → NACK + grid fallback, tekrarlanabilirlik, soket kapanışı
+- `test_metrics.py` — KPI'lar bilinen tablolarda, eşik altı residual'lı enerji dengesi,
+  fatura = − Σ bakiye, P2P < baseline bağımlılık, aşama zamanlayıcısı sonucu değiştirmez
+- `test_perf_scale.py` — 10 ajan × 3 backend (1 gün) temiz, `cda_zmq` = `cda`, hata satırı,
+  CSV + grafik; 30/50 ajan 3 günlük tam matris `@pytest.mark.slow`
 
 İletişim testlerinde her bekleme bir son tarihe bağlı poll'dur; doğruluk hiçbir
 yerde "yeterince uzun" bir `sleep`'e bırakılmaz. Bozuk bir uygulama testi asmaz,
