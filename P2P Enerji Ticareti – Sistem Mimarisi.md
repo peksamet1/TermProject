@@ -116,8 +116,9 @@ Her bileşen mevcut koddaki bir modüle ya da eklenecek tek bir dosyaya karşıl
 
 ### 4.6 Metrik ve analiz
 
-- Mesa `DataCollector` (mevcut) adım verilerini toplar. `metrics.py`'deki fonksiyonlar KPI'ları bu çıktıdan ve iletişim sayacından hesaplar (Bölüm 8).
-- `experiments/` aynı seed ve veriyle baseline (`logging`) ve P2P (`cda_zmq`) koşularını çalıştırır; sonuçlar `results/` altında CSV ve grafik (Matplotlib, Plotly) olarak çıkar.
+- Mesa `DataCollector` (mevcut) adım verilerini toplar. `metrics.py`'deki fonksiyonlar KPI'ları bu çıktıdan ve iletişim sayacından hesaplar (Bölüm 8). Faz 5 performans deneyi ve Faz 6 analizi aynı fonksiyonları kullanır.
+- `experiments/perf_scale.py` aynı seed ve veriyle baseline (`logging`), süreç içi CDA ve `cda_zmq` koşar.
+- `experiments/analyze.py` (Faz 6) bu koşuyu 5–8 seed, yaz (gün 172) ve kış (gün 355) için tekrarlar; ortalama ± örneklem sapması verir. Duyarlılık tek faktörledir: batarya kapasitesi, prosumer oranı, PV tepe gücü, perakende fiyat. Çıktı `results/analysis/` altında CSV ve Matplotlib grafiktir. `--profiles` aynı ızgarayı CSV ile koşar. PSD 9.1 kanıt tablosu `evidence.md` olarak yazılır.
 
 ### 4.7 Ön doğrulama
 
@@ -185,7 +186,7 @@ microgrid/
 ├── physics.py          PhysicalSimulator + batarya süreci (yeni)
 └── metrics.py          KPI hesapları (yeni)
 data/                   profil CSV'leri (yeni)
-experiments/            baseline karşılaştırma koşuları (yeni)
+experiments/            perf_scale.py (Faz 5), analyze.py (Faz 6)
 tests/
 run.py                  tek koşu, konsol özeti + grafik
 app.py                  SolaraViz geliştirme paneli, yalnızca cda/logging

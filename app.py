@@ -1,12 +1,16 @@
-"""Interactive SolaraViz dashboard.
+"""Interactive SolaraViz dashboard (a development panel, not a public app).
 
 Usage: solara run app.py
-Page 0: community energy balance and macro-grid dependency.
+Page 0: community energy balance, grid flows, and the running KPIs.
 Page 1: SoC, order counts, local P2P trade volume/price.
 Page 2: per-household generation/consumption and buy/sell orders (stacked).
+Page 3: Phase 6 comparison already written by ``python -m experiments.analyze``.
+        The panel does not recompute it and does not open ZeroMQ sockets.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pandas as pd
 import solara
@@ -14,7 +18,10 @@ from matplotlib.figure import Figure
 from mesa.visualization import SolaraViz, make_plot_component
 from mesa.visualization.utils import update_counter
 
+from microgrid.metrics import grid_dependence
 from microgrid.model import MicrogridModel
+
+ANALYSIS_SUMMARY = Path(__file__).parent / "results" / "analysis" / "summary.csv"
 
 model_params = {
     "num_prosumers": {
@@ -49,6 +56,20 @@ model_params = {
         "step": 1.0,
         "label": "Batarya kapasitesi (kWh)",
     },
+    "start_day_of_year": {
+        "type": "SliderInt",
+        "value": 172,
+        "min": 1,
+        "max": 365,
+        "step": 1,
+        "label": "Yilin gunu (172 yaz, 355 kis)",
+    },
+    "market_backend": {
+        "type": "Select",
+        "value": "cda",
+        "values": ["cda", "logging"],
+        "label": "Piyasa",
+    },
     "seed": 42,
 }
 
@@ -61,6 +82,49 @@ def _agent_history(model: MicrogridModel):
     if len(agent_df) == 0:
         return None
     return agent_df
+
+
+@solara.component
+def RunKpis(model: MicrogridModel):
+    """Page 0: dependence and local trade of the steps played so far."""
+    update_counter.get()
+    frame = model.datacollector.get_model_vars_dataframe()
+    if frame is None or len(frame) == 0:
+        solara.Markdown("Henuz adim yok. Modeli ilerletince bagimlilik ve yerel kWh burada yazar.")
+        return
+    dependence = grid_dependence(frame)
+    local = float(frame["LocalTradedKwh"].sum())
+    imported = float(frame["GridImport"].sum())
+    solara.Markdown(
+        f"**Sebeke bagimliligi** {100 * dependence:.1f}% "
+        f"(alim {imported:.2f} kWh) · **Yerel ticaret** {local:.2f} kWh"
+    )
+
+
+@solara.component
+def AnalysisComparison(model: MicrogridModel):
+    """Page 3: read results/analysis/summary.csv. Does not run the experiment."""
+    del model  # SolaraViz always passes the live model; this page ignores it.
+    if not ANALYSIS_SUMMARY.is_file():
+        solara.Markdown(
+            "Karsilastirma yok. Once `python -m experiments.analyze` calistirin; "
+            "cikti `results/analysis/summary.csv`."
+        )
+        return
+    frame = pd.read_csv(ANALYSIS_SUMMARY)
+    seasons = frame[(frame["sweep"] == "season") & (frame["backend"].isin(["logging", "cda"]))]
+    if seasons.empty:
+        solara.Markdown("summary.csv icinde mevsim satiri yok.")
+        return
+    fig = Figure(figsize=(7.2, 4.0), layout="constrained")
+    ax = fig.subplots()
+    seasons = seasons.copy()
+    seasons["label"] = seasons["season"] + " / " + seasons["backend"]
+    ax.bar(seasons["label"], seasons["grid_dependence_mean"] * 100, color="#2a78d6")
+    ax.set_ylabel("Sebeke bagimliligi (%)")
+    ax.set_title("Analiz betigi: ortalama bagimlilik (yeniden hesaplanmaz)")
+    ax.tick_params(axis="x", labelrotation=20)
+    solara.FigureMatplotlib(fig)
 
 
 @solara.component
@@ -117,6 +181,7 @@ model = MicrogridModel()
 page = SolaraViz(
     model,
     components=[
+        RunKpis,
         energy_plot,
         grid_plot,
         soc_plot,
@@ -124,7 +189,8 @@ page = SolaraViz(
         trade_plot,
         price_plot,
         (AgentHouseholdPlots, 2),
+        (AnalysisComparison, 3),
     ],
     model_params=model_params,
-    name="P2P Microgrid (Phase 4a CDA)",
+    name="P2P Microgrid",
 )

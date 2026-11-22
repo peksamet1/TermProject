@@ -22,6 +22,9 @@ timestamp,household_id,pv_kw,load_kw
 - İndir: "Solar home half-hour data - 1 July 2012 to 30 June 2013" (zip).
 - Zip'i aç, içindeki CSV'yi `data/raw/ausgrid/` içine koy.
 - Lisans: CC BY 4.0 (raporda kaynak gösterilmeli).
+- Sayfa dosyayı artık vermezse aynı CC BY 4.0 arşivin kopyası:
+  https://pierreh.eu/downloads/Ausgrid_solar_home_data.zip
+  İçindeki `Solar home 2012-2013.csv` bu hattın girdisidir.
 - Biçim: başta bir başlık satırı, sonra `Customer, Generator Capacity, Postcode,
   Consumption Category, date, 0:30 ... 0:00, Row Quality`. Değerler yarım
   saatlik kWh. Tüketim = `GC` + `CL`; `GG` (Avustralya PV'si) kullanılmaz.

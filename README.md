@@ -18,7 +18,7 @@ Fazlar PSD 8.1'i izler; ayrıntılar Geliştirme Planı dokümanında.
 | 3 | ZeroMQ P2P iletişim altyapısı | Kutluay | Tamamlandı; açık not: Windows'ta 50 düğüm tcp (aşağıda) |
 | 4 | CDA piyasa mekanizması (ZeroMQ üzerinden) | Yusuf | `cda_zmq` hazır: her düğümde CDA kopyası, TRADE/NACK onayı, grid fallback |
 | 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | Tamamlandı: SimPy batarya fiziği, grid fallback, KPI'lar (`metrics.py`) ve 10/30/50 ajan performans deneyi |
-| 6 | Veri analizi ve final dokümantasyon | Yusuf | Başlanmadı |
+| 6 | Veri analizi ve final dokümantasyon | Yusuf | Analiz betiği hazır: 8 seed, yaz/kış, dört duyarlılık grafiği; sentetik ve Ausgrid+PVGIS |
 
 ## Kurulum ve Çalıştırma
 
@@ -34,14 +34,16 @@ pip install -r requirements.txt
 
 python run.py          # headless koşu: konsol özeti + results/summary.png
 $env:SOLARA_TELEMETRY_MIXPANEL_ENABLE = "False"
-solara run app.py      # etkileşimli SolaraViz paneli
-                       #   Page 0: enerji dengesi + LocalTradedKwh + grid
+solara run app.py      # etkileşimli SolaraViz paneli (ZeroMQ açmaz)
+                       #   Page 0: enerji dengesi, şebeke, bağımlılık / yerel kWh
                        #   Page 1: SoC, emirler, local trade hacmi/fiyat
                        #   Page 2: hane bazli generation/consumption + orders
+                       #   Page 3: results/analysis/summary.csv (varsa; yeniden koşmaz)
 pytest                 # test paketi (30/50 düğümlü koşular hariç)
 pytest -m slow         # 30/50 düğüm/ajan koşuları (~1-2 dk)
 python -m experiments.comm_scale   # iletişim ölçek deneyi -> results/comm_scale.*
 python -m experiments.perf_scale   # tüm simülasyon, 10/30/50 ajan -> results/perf_scale.*
+python -m experiments.analyze      # Faz 6: seed, mevsim, duyarlılık -> results/analysis/
 ```
 
 macOS / Linux'ta etkinleştirme `source .venv/bin/activate`, ortam değişkeni
@@ -84,7 +86,8 @@ microgrid/
     └── network.py   PeerNetwork: kurulum, el sıkışması, bariyer, REQ-REP turları
 experiments/
 ├── comm_scale.py    3/10/30/50 düğüm iletişim ölçek deneyi
-└── perf_scale.py    10/30/50 ajan × 3 backend performans deneyi (Faz 5)
+├── perf_scale.py    10/30/50 ajan × 3 backend performans deneyi (Faz 5)
+└── analyze.py       Faz 6: çoklu seed, yaz/kış, duyarlılık, PSD 9.1 kanıt tablosu
 ```
 
 Her 15 dakikalık adım (`MicrogridModel.step()`) dört aşamadan oluşur. Her faz
@@ -194,6 +197,80 @@ mesaj 0; önerilen her işlem onaylandı.
 Rakamlar tek makinede tek koşudur; mutlak süreler makineye göre değişir,
 oranlar ve doğruluk sonuçları değişmez. Gerçek veri geldiğinde aynı deney
 `--profiles` ile koşar.
+
+## Faz 6: analiz
+
+`experiments/analyze.py`, Faz 5'teki `run_one` / `compare` ve `microgrid.metrics`
+fonksiyonlarını kullanır. Yeni bir KPI tanımı yok. Tek komut:
+
+```powershell
+python -m experiments.analyze
+python -m experiments.analyze --profiles data/profiles_istanbul.csv --out results/analysis_istanbul
+```
+
+Varsayılan koşu `results/analysis/` altına ham satırlar (`runs.csv`), ortalama ve
+örneklem sapması (`summary.csv`), `seasons.png`, dört `sensitivity_*.png` ve
+`evidence.md` (PSD 9.1: kriter, ölçülen değer, hangi test) yazar. `results/`
+git'e girmez; aşağıdaki tablo bu koşunun metnidir.
+
+Koşul: 10 ajan (%60 prosumer), 3 gün, sentetik profil, sabit marjlı fiyat
+(SoC'ye duyarlı strateji yok). Yaz = yılın 172. günü, kış = 355. Ekonomi
+karşılaştırması `logging` ve `cda`. Her mevsimde ilk seed ile bir `cda_zmq`
+(10 ajan, tcp) faturanın `cda` ile aynı olduğunu doğrular; 50 düğüm tcp
+denenmez (Windows'ta bilinen sınır, ölçüm `inproc`). Sentetikte seed hem
+profil gürültüsünü hem aktivasyon sırasını değiştirir. CSV profilde enerji
+serisi dosyadan gelir; seed yalnız aktivasyon sırasını değiştirir.
+
+Mevsimler, seed 42–49 (n=8). Bağımlılık = şebeke alımı / tüketim.
+
+| Mevsim | Bağımlılık baseline → P2P | Azalma | Talep karşılama | Tasarruf (TL / 3 gün) |
+|---|---|---|---|---|
+| Yaz | %39.8 ± 2.1 → %24.9 ± 1.3 | %37.5 ± 1.6 | 0.375 ± 0.016 | 69.1 ± 6.0 |
+| Kış | %41.8 ± 2.0 → %40.6 ± 2.0 | %3.0 ± 2.1 | 0.030 ± 0.021 | 5.6 ± 4.1 |
+
+Kışın PV az olduğu için yerelde satılacak fazla enerji yok; azalma sıfıra yakın
+ve bazı seed'lerde iki backend aynı bağımlılığı veriyor. Yaz, Faz 5'teki tek
+koşuyla aynı yönde (%35 civarı; seed 42 tek başına %35.3). `cda_zmq` her iki
+mevsimde `cda` ile aynı faturayı verdi, mesaj kaybı 0. Kısıt ihlali 0, en büyük
+enerji dengesi hatası 1.8e-15 kWh.
+
+Duyarlılık yazın, tek faktör, seed 42–46 (n=5). Y ekseni bağımlılık azalması.
+Varsayılan nokta (10 kWh, %60, 5 kW, 3.50 TL) bu beş seed'de %37.0 ± 2.0;
+sekiz seed'lik mevsim satırından bir puan farklı olması seed sayısından gelir.
+
+| Faktör | Değerler | Azalma |
+|---|---|---|
+| Batarya | 2, 5, 10, 20 kWh | %34.6, %38.1, %37.0, %35.7 (sapma ~2 puan) |
+| Prosumer oranı | 0.2, 0.4, 0.6, 0.8, 1.0 | %27.8, %33.3, %37.0, %39.9; 1.0'da şebeke alımı zaten 0, azalma tanımsız |
+| PV tepe | 2, 5, 8 kW | %19.6, %37.0, %45.5 |
+| Perakende fiyat | 2.0, 3.5, 5.0 TL/kWh (feed-in 1.20) | Azalma hep %37.0; tasarruf 23.7, 68.2, 112.7 TL |
+
+Kapasite 0 kabul edilmez (`Battery`). Tarife, sabit marj bandın içinde kaldığı
+için eşleşen kWh'yi değiştirmez; değişen, topluluğun TL tasarrufudur. Bu yüzden
+tarife grafiğinin ikinci paneli tasarruftur.
+
+Bu koşu: Windows 11 AMD64, Python 3.14.5. Mutlak süreler makineye göredir.
+
+Gerçek profil aynı betikle üretildi (`results/analysis_istanbul/`). Girdi:
+Ausgrid Solar Home 2012–2013 (CC BY 4.0) ve İstanbul PVGIS 2019. Ayarlar
+`microgrid/profiles/real_data.py` içinde: yarım saat iki eşit 15 dakikaya
+bölünür, tüketim ~6.6 kWh/gün olacak şekilde tek katsayıyla ölçeklenir
+(dosyada 6.58), tarihler 182 gün kaydırılır, PV = PVGIS kW/kWp × hanenin
+kWp'si (dosyada ortalama 19.7 kWh/gün). Yaz penceresi 2013-06-21, kış
+2013-12-21. OPSD ana sonuç değildir. Resmi Ausgrid sayfası dosyayı artık
+vermediği için kullanılan kopya
+[pierreh.eu](https://pierreh.eu/downloads/Ausgrid_solar_home_data.zip)
+üzerindeki CC BY 4.0 arşividir (`Solar home 2012-2013.csv`).
+
+Bu profilde her alış fiyatı her satış fiyatının üstündedir, toplam eşleşen
+kWh aktivasyon sırasından bağımsızdır. Seed'ler aynı sayıyı verdiği için
+sapma 0'dır. `cda_zmq` yine `cda` ile aynı faturayı verdi, kayıp 0, kısıt
+ihlali 0.
+
+| Mevsim | Bağımlılık baseline → P2P | Azalma | Talep karşılama | Tasarruf (TL / 3 gün) |
+|---|---|---|---|---|
+| Yaz (21 Haziran) | %47.4 → %24.7 | %47.8 | 0.478 | 92.4 |
+| Kış (21 Aralık) | %52.8 → %47.2 | %10.7 | 0.107 | 42.1 |
 
 ## CDA kuralları
 
@@ -486,6 +563,8 @@ SoC değil.
   fatura = − Σ bakiye, P2P < baseline bağımlılık, aşama zamanlayıcısı sonucu değiştirmez
 - `test_perf_scale.py` — 10 ajan × 3 backend (1 gün) temiz, `cda_zmq` = `cda`, hata satırı,
   CSV + grafik; 30/50 ajan 3 günlük tam matris `@pytest.mark.slow`
+- `test_analyze.py` — ortalama ± örneklem sapması, NaN KPI'nın dışlanması, mevsim
+  penceresi, tarife grafiği; 1 seed / 1 gün duman koşusu (`--skip-sensitivity`)
 
 İletişim testlerinde her bekleme bir son tarihe bağlı poll'dur; doğruluk hiçbir
 yerde "yeterince uzun" bir `sleep`'e bırakılmaz. Bozuk bir uygulama testi asmaz,

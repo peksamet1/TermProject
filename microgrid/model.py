@@ -52,6 +52,7 @@ class MicrogridModel(Model):
         battery_capacity_kwh: float | None = None,
         market_backend: str | None = None,
         seed: int | None = None,
+        start_day_of_year: int | None = None,
         config: SimulationConfig | None = None,
     ) -> None:
         self.config = config or SimulationConfig()
@@ -60,6 +61,8 @@ class MicrogridModel(Model):
         pv_peak_kw = pv_peak_kw if pv_peak_kw is not None else self.config.pv_peak_kw
         if battery_capacity_kwh is not None:
             self.config.battery.capacity_kwh = battery_capacity_kwh
+        if start_day_of_year is not None:
+            self.config.start_day_of_year = start_day_of_year
         backend = market_backend if market_backend is not None else self.config.market_backend
         seed = seed if seed is not None else self.config.seed
 

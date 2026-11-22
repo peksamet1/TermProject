@@ -46,7 +46,7 @@ from pathlib import Path
 
 import zmq
 
-from microgrid.config import CommConfig, SimulationConfig
+from microgrid.config import BatteryConfig, CommConfig, SimulationConfig, TariffConfig
 from microgrid.metrics import StageTimer, reduction_pct, run_kpis
 from microgrid.model import MARKET_BACKENDS, MicrogridModel
 from microgrid.physics import SyncError
@@ -108,8 +108,25 @@ def make_config(
     transport: str = "auto",
     profiles: str | None = None,
     start: str | None = None,
+    *,
+    start_day_of_year: int | None = None,
+    pv_peak_kw: float | None = None,
+    battery_capacity_kwh: float | None = None,
+    retail_tl_per_kwh: float | None = None,
+    prosumer_share: float | None = None,
 ) -> SimulationConfig:
-    prosumers, consumers = household_mix(num_agents)
+    """One run's config. Keyword overrides are the Phase 6 sensitivity knobs.
+
+    Omitted overrides keep ``SimulationConfig`` defaults, so the Phase 5
+    matrix (no keyword arguments) does not change.
+    """
+    if prosumer_share is None:
+        prosumers, consumers = household_mix(num_agents)
+    else:
+        if not 0 < prosumer_share <= 1:
+            raise ValueError("prosumer_share must be in (0, 1]")
+        prosumers = min(num_agents, max(1, math.floor(prosumer_share * num_agents + 0.5)))
+        consumers = num_agents - prosumers
     config = SimulationConfig(
         num_days=days,
         num_prosumers=prosumers,
@@ -118,6 +135,20 @@ def make_config(
         seed=seed,
         comm=CommConfig(transport=resolve_transport(transport, num_agents)),
     )
+    if start_day_of_year is not None:
+        config.start_day_of_year = start_day_of_year
+    if pv_peak_kw is not None:
+        if pv_peak_kw <= 0:
+            raise ValueError("pv_peak_kw must be positive")
+        config.pv_peak_kw = pv_peak_kw
+    if battery_capacity_kwh is not None:
+        if battery_capacity_kwh <= 0:
+            raise ValueError("battery_capacity_kwh must be positive")
+        config.battery = BatteryConfig(capacity_kwh=battery_capacity_kwh)
+    if retail_tl_per_kwh is not None:
+        if retail_tl_per_kwh <= config.tariff.feed_in_tl_per_kwh:
+            raise ValueError("retail price must be above the feed-in price")
+        config.tariff = TariffConfig(retail_tl_per_kwh=retail_tl_per_kwh)
     if profiles:
         config.profile_source = "csv"
         config.profile_csv_path = profiles
@@ -142,11 +173,18 @@ def run_one(
     transport: str = "auto",
     profiles: str | None = None,
     start: str | None = None,
+    **scenario,
 ) -> dict:
-    """One cell of the matrix; returns its CSV row. Never raises on a run failure."""
+    """One cell of the matrix; returns its CSV row. Never raises on a run failure.
+
+    ``scenario`` is forwarded to ``make_config`` (season, PV, battery, tariff,
+    prosumer share). Unknown names raise ``TypeError`` before the run.
+    """
     if backend not in MARKET_BACKENDS:
         raise ValueError(f"unknown backend {backend!r}; use one of {MARKET_BACKENDS}")
-    config = make_config(num_agents, backend, days, seed, transport, profiles, start)
+    config = make_config(
+        num_agents, backend, days, seed, transport, profiles, start, **scenario
+    )
     row: dict = dict.fromkeys(COLUMNS)
     row.update(
         num_agents=num_agents,

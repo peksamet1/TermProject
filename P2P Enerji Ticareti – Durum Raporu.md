@@ -4,18 +4,18 @@ Oct 16, 2026 · @Kutluay Talay
 
 Faz 1 bitti: tüm kod tek ve çalışan bir `main` dalında, 58 testin hepsi geçiyor. Sıradaki büyük iş Faz 3 (ZeroMQ iletişimi) ve paralelde Faz 2'nin kalanı; Kasım'daki M2 kilometre taşına yetişmeleri gerekiyor.
 
-## Fazların durumu
+**Güncelleme (22 Kasım 2026).** Faz 1–5 `main`'de. PR #9 performans testlerini ve `microgrid/metrics.py` KPI'larını getirdi. Faz 6 analizi `experiments/analyze.py`: 8 seed, yaz ve kış, dört duyarlılık grafiği, PSD 9.1 kanıt tablosu. Sentetik sonuçlar README'de. Aynı komut Ausgrid + İstanbul PVGIS profiliyle de koşar (`--profiles`). SoC'ye duyarlı strateji hâlâ opsiyonel. Windows'ta 50 düğüm tcp bilinen sınır; raporda `inproc` ile geçiliyor. Uzun tez metni Google Docs'ta kalır.
 
-Altı fazdan biri bitti, ikisinin çekirdeği hazır, üçü henüz başlamadı.
+## Fazların durumu
 
 | Faz | Ne yapıyor | Lider | Durum |
 | --- | --- | --- | --- |
 | 1 | Gereksinimler, tek kod tabanı, ortak veri yapıları | Tüm ekip | Bitti |
-| 2 | Ajanlar ve enerji profilleri (Mesa) | Erol | Çekirdek hazır; CSV verisi ve SoC'ye duyarlı strateji kaldı |
+| 2 | Ajanlar ve enerji profilleri (Mesa) | Erol | Çekirdek ve veri hattı bitti; SoC'ye duyarlı strateji opsiyonel |
 | 3 | Ajanlar arası mesajlaşma (ZeroMQ) | Kutluay | Bitti; açık not: Windows'ta 50 düğüm tcp (aşağıda) |
-| 4 | Alım-satım eşleştirmesi (CDA) | Yusuf | Tek süreçte çalışıyor; ZeroMQ üzerinden çalışması kaldı |
-| 5 | Batarya fiziği (SimPy) ve performans testleri | Erol + Kutluay | Başlanmadı |
-| 6 | Sonuç analizi ve final rapor | Yusuf | Başlanmadı |
+| 4 | Alım-satım eşleştirmesi (CDA) | Yusuf | Bitti: `cda_zmq`, TRADE/NACK, grid fallback |
+| 5 | Batarya fiziği (SimPy) ve performans testleri | Erol + Kutluay | Bitti (PR #8 fizik, PR #9 performans) |
+| 6 | Sonuç analizi ve final rapor | Yusuf | Analiz betiği ve çoklu seed sonuçları hazır; final rapor metni Docs'ta |
 
 ## Bugüne kadar yapılanlar
 
