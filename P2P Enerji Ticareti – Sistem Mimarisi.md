@@ -74,7 +74,7 @@ Her bileşen mevcut koddaki bir modüle ya da eklenecek tek bir dosyaya karşıl
   - Fazla varsa: fazlanın (1 − s) kadarı bataryaya, kalanı piyasaya; ask = feed-in + sell\_margin × (1 − s) × bant.
   - Açık varsa: açığın s kadarı bataryadan, kalanı piyasadan; bid = perakende − buy\_margin × s × bant.
   - Bataryasız ajan: mevcut sabit marj. Fiyat her zaman \[feed-in, perakende\] bandında ve sonlu bir sayıdır; NaN fiyat reddedilir.
-- Neden adım başındaki SoC: mevcut "önce batarya" kuralında emir anındaki SoC hep 0.95 (satıcı) ya da 0.10 (alıcı) çıkıyor, bu yüzden fiyatı hiç değiştirmiyor.
+- Neden adım başındaki SoC: pay ve fiyat, plan uygulanmadan önceki doluluğu kullanır. Plan uygulandıktan sonra okunsaydı satıcı yeni şarjla dolu, alıcı yeni deşarjla boş görünürdü.
 - Topoloji (PSD Tablo 2, "Spatial Topology"): tüm haneler tek mikrogridde ve tek CDA'ya katılır (PSD Şekil 1); iletişim tam mesh; peer listesi config'ten gelir. Mesafe ya da hat modeli yoktur (PSD 5.2).
 
 ### 4.3 İletişim (ZeroMQ)

@@ -14,7 +14,7 @@ Fazlar PSD 8.1'i izler; ayrıntılar Geliştirme Planı dokümanında.
 | Faz | Kapsam | Lider | Durum |
 |---|---|---|---|
 | 1 | Literatür, gereksinimler, tek kod tabanı, sabit veri yapıları | Tüm ekip | Tamamlandı |
-| 2 | Mesa ile ajan mantığı ve enerji profilleri | Erol | Çekirdek + veri hattı hazır (kalibre mock, CSV, Ausgrid/PVGIS); SoC'ye duyarlı strateji kaldı |
+| 2 | Mesa ile ajan mantığı ve enerji profilleri | Erol | Çekirdek + veri hattı hazır (kalibre mock, CSV, Ausgrid/PVGIS). SoC payı ve fiyatı Faz 6'da |
 | 3 | ZeroMQ P2P iletişim altyapısı | Kutluay | Tamamlandı; açık not: Windows'ta 50 düğüm tcp (aşağıda) |
 | 4 | CDA piyasa mekanizması (ZeroMQ üzerinden) | Yusuf | `cda_zmq` hazır: her düğümde CDA kopyası, TRADE/NACK onayı, grid fallback |
 | 5 | Mesa-SimPy ko-simülasyonu ve performans testleri | Erol + Kutluay | Tamamlandı: SimPy batarya fiziği, grid fallback, KPI'lar (`metrics.py`) ve 10/30/50 ajan performans deneyi |
@@ -34,11 +34,9 @@ pip install -r requirements.txt
 
 python run.py          # headless koşu: konsol özeti + results/summary.png
 $env:SOLARA_TELEMETRY_MIXPANEL_ENABLE = "False"
-solara run app.py      # etkileşimli SolaraViz paneli (ZeroMQ açmaz)
-                       #   Page 0: enerji dengesi, şebeke, bağımlılık / yerel kWh
-                       #   Page 1: SoC, emirler, local trade hacmi/fiyat
-                       #   Page 2: hane bazli generation/consumption + orders
-                       #   Page 3: results/analysis/summary.csv (varsa; yeniden koşmaz)
+solara run app.py      # interactive SolaraViz panel (does not open ZeroMQ)
+                       #   Simulation: community totals and the selected household
+                       #   Saved analysis: results/analysis/summary.csv (not recomputed)
 pytest                 # test paketi (30/50 düğümlü koşular hariç)
 pytest -m slow         # 30/50 düğüm/ajan koşuları (~1-2 dk)
 python -m experiments.comm_scale   # iletişim ölçek deneyi -> results/comm_scale.*
@@ -183,6 +181,8 @@ mesaj 0; önerilen her işlem onaylandı.
 | 30 | %39.5 → %24.7 | %37.5 | 0.116 | 0.375 | −721.3 → −925.3 | 204.0 |
 | 50 | %39.3 → %24.5 | %37.6 | 0.115 | 0.376 | −1217.7 → −1550.1 | 332.5 |
 
+Bu tablo Faz 5 ölçümüdür. Batarya, netin güç ve pencere sınırına kadar olan kısmını alıyordu. Aşağıdaki Faz 6 tabloları doluluk payıyla yeniden koşuldu.
+
 - Şebeke bağımlılığı = şebekeden alım / toplam tüketim. Fatura negatif: Haziran'da
   topluluk şebekeye sattığından fazla kazanıyor; P2P bu kazancı artırıyor.
 - İşlem başarı oranı = yerelde karşılanan emir hacmi / toplam emir hacmi (her
@@ -213,37 +213,39 @@ Varsayılan koşu `results/analysis/` altına ham satırlar (`runs.csv`), ortala
 `evidence.md` (PSD 9.1: kriter, ölçülen değer, hangi test) yazar. `results/`
 git'e girmez; aşağıdaki tablo bu koşunun metnidir.
 
-Koşul: 10 ajan (%60 prosumer), 3 gün, sentetik profil, sabit marjlı fiyat
-(SoC'ye duyarlı strateji yok). Yaz = yılın 172. günü, kış = 355. Ekonomi
+Koşul: 10 ajan (%60 prosumer), 3 gün, sentetik profil. Yaz = yılın 172. günü, kış = 355. Ekonomi
 karşılaştırması `logging` ve `cda`. Her mevsimde ilk seed ile bir `cda_zmq`
 (10 ajan, tcp) faturanın `cda` ile aynı olduğunu doğrular; 50 düğüm tcp
-denenmez (Windows'ta bilinen sınır, ölçüm `inproc`). Sentetikte seed hem
-profil gürültüsünü hem aktivasyon sırasını değiştirir. CSV profilde enerji
-serisi dosyadan gelir; seed yalnız aktivasyon sırasını değiştirir.
+denenmez (Windows'ta bilinen sınır, ölçüm `inproc`). Batarya, adım başındaki
+doluluğa göre fazlanın veya açığın bir payını alır; kalan piyasaya gider.
+Sentetikte seed hem profil gürültüsünü hem aktivasyon sırasını değiştirir.
+CSV profilde enerji serisi dosyadan gelir; seed yalnız aktivasyon sırasını
+değiştirir.
 
 Mevsimler, seed 42–49 (n=8). Bağımlılık = şebeke alımı / tüketim.
 
 | Mevsim | Bağımlılık baseline → P2P | Azalma | Talep karşılama | Tasarruf (TL / 3 gün) |
 |---|---|---|---|---|
-| Yaz | %39.8 ± 2.1 → %24.9 ± 1.3 | %37.5 ± 1.6 | 0.375 ± 0.016 | 69.1 ± 6.0 |
-| Kış | %41.8 ± 2.0 → %40.6 ± 2.0 | %3.0 ± 2.1 | 0.030 ± 0.021 | 5.6 ± 4.1 |
+| Yaz | %43.4 ± 1.9 → %22.7 ± 1.2 | %47.7 ± 1.6 | 0.477 ± 0.016 | 96.0 ± 7.9 |
+| Kış | %64.4 ± 1.2 → %58.0 ± 1.2 | %10.0 ± 0.6 | 0.100 ± 0.006 | 29.7 ± 2.4 |
 
-Kışın PV az olduğu için yerelde satılacak fazla enerji yok; azalma sıfıra yakın
-ve bazı seed'lerde iki backend aynı bağımlılığı veriyor. Yaz, Faz 5'teki tek
-koşuyla aynı yönde (%35 civarı; seed 42 tek başına %35.3). `cda_zmq` her iki
-mevsimde `cda` ile aynı faturayı verdi, mesaj kaybı 0. Kısıt ihlali 0, en büyük
-enerji dengesi hatası 1.8e-15 kWh.
+Kış azalması %10.0. Yaz, sekiz seed'de %47.7. `cda_zmq` her iki mevsimde `cda`
+ile aynı faturayı verdi, mesaj kaybı 0. Kısıt ihlali 0, en büyük enerji dengesi
+hatası 1.8e-15 kWh.
 
 Duyarlılık yazın, tek faktör, seed 42–46 (n=5). Y ekseni bağımlılık azalması.
-Varsayılan nokta (10 kWh, %60, 5 kW, 3.50 TL) bu beş seed'de %37.0 ± 2.0;
-sekiz seed'lik mevsim satırından bir puan farklı olması seed sayısından gelir.
+Varsayılan nokta (10 kWh, %60, 5 kW, 3.50 TL) bu beş seed'de %47.2 ± 1.9;
+sekiz seed'lik mevsim satırından yarım puan farklı olması seed sayısından gelir.
 
 | Faktör | Değerler | Azalma |
 |---|---|---|
-| Batarya | 2, 5, 10, 20 kWh | %34.6, %38.1, %37.0, %35.7 (sapma ~2 puan) |
-| Prosumer oranı | 0.2, 0.4, 0.6, 0.8, 1.0 | %27.8, %33.3, %37.0, %39.9; 1.0'da şebeke alımı zaten 0, azalma tanımsız |
-| PV tepe | 2, 5, 8 kW | %19.6, %37.0, %45.5 |
-| Perakende fiyat | 2.0, 3.5, 5.0 TL/kWh (feed-in 1.20) | Azalma hep %37.0; tasarruf 23.7, 68.2, 112.7 TL |
+| Batarya | 2, 5, 10, 20 kWh | %38.1, %44.0, %47.2, %47.6 (sapma ~2 puan) |
+| Prosumer oranı | 0.2, 0.4, 0.6, 0.8, 1.0 | %34.3, %43.8, %47.2, %44.5, %0.3 |
+| PV tepe | 2, 5, 8 kW | %26.1, %47.2, %53.3 |
+| Perakende fiyat | 2.0, 3.5, 5.0 TL/kWh (feed-in 1.20) | Azalma hep %47.2; tasarruf 33.2, 95.5, 157.7 TL |
+
+Oran 1.0 iken topluluk yine yaklaşık %5.8 şebeke alır; her hane üretici olduğu
+için azalma %0.3 ± 0.2 kalır.
 
 Kapasite 0 kabul edilmez (`Battery`). Tarife, sabit marj bandın içinde kaldığı
 için eşleşen kWh'yi değiştirmez; değişen, topluluğun TL tasarrufudur. Bu yüzden
@@ -269,8 +271,8 @@ ihlali 0.
 
 | Mevsim | Bağımlılık baseline → P2P | Azalma | Talep karşılama | Tasarruf (TL / 3 gün) |
 |---|---|---|---|---|
-| Yaz (21 Haziran) | %47.4 → %24.7 | %47.8 | 0.478 | 92.4 |
-| Kış (21 Aralık) | %52.8 → %47.2 | %10.7 | 0.107 | 42.1 |
+| Yaz (21 Haziran) | %56.0 → %30.8 | %44.9 | 0.449 | 102.3 |
+| Kış (21 Aralık) | %68.3 → %57.8 | %15.3 | 0.153 | 77.8 |
 
 ## CDA kuralları
 
@@ -511,7 +513,7 @@ API: `encode_message` / `decode_message` — `microgrid.comm.protocol`.
 
 **Rol ≠ tip.** Al/sat o adımdaki net enerjiden gelir; sınıflar yapısal farkı taşır.
 
-**Batarya-önce-pazar.** Strateji henüz sabit marjlı; SoC'ye duyarlı strateji Faz 2'de.
+**Doluluğa göre pay.** Adım başındaki doluluk `s`, fazlanın `(1 − s)` kadarını ve açığın `s` kadarını bataryaya ayırır; kalan piyasaya çıkar. Güç sınırı ve doluluk penceresi bu hedefi kırpar. Fiyat aynı `s` ile bandın içinde kayar: dolu batarya ucuza satar, boş batarya perakendeye kadar çıkar. Bataryasız hane netin tamamını sabit marjla sunar. Varsayılan marj 0,25 olduğu için en yüksek satış fiyatı en düşük alışın altında kalır ve kitap miktara göre temizlenir. Pay, piyasaya kalan kWh'yi ve şebeke bağımlılığını değiştirir.
 
 **Pazar arayüzü.** Ajanlar yalnızca `market.submit(order)` ve adım sonunda,
 IDLE olsalar bile, `market.publish_status(self)` çağırır; CDA veya Logging

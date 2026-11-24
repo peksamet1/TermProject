@@ -151,9 +151,17 @@ def test_clock_drift_is_detected():
 
 def test_shortfall_falls_back_to_grid_and_is_paid():
     """Heavy fade makes batteries fall short; that volume is exported at
-    feed-in (charge) or imported at retail (discharge), and the books close."""
+    feed-in (charge) or imported at retail (discharge), and the books close.
+
+    The SoC share only plans the whole remaining headroom when the window is
+    thin enough that the share exceeds it. Fade then clips that plan inside
+    the slot, which is the shortfall this test pays on the grid.
+    """
     config = SimulationConfig(market_backend="logging")  # no local trades
     config.battery.fade_per_cycle = 0.02
+    config.battery.soc_min = 0.50
+    config.battery.soc_max = 0.55
+    config.battery.initial_soc = 0.52
     tariff = config.tariff
     with MicrogridModel(config=config) as model:
         shortfall_seen = 0.0

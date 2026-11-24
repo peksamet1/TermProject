@@ -26,7 +26,9 @@ With ``--profiles``, those seasons are two windows in the file (day-of-year
 172 and 355, or ``--summer-start`` / ``--winter-start``).
 
 Battery capacity cannot be zero (``Battery`` rejects it); the sweep starts
-at 2 kWh. Pricing stays the fixed-margin strategy.
+at 2 kWh. Start-of-step SoC sets both the price and the battery's share of
+the net. At the default 0.25 margins every bid still clears every ask. The
+share changes the residual, so grid dependence moves with SoC.
 """
 
 from __future__ import annotations
@@ -397,12 +399,13 @@ def write_evidence(rows: list[dict], summary: list[dict], path: Path, profiles: 
                 f"± {cell['dependence_reduction_pct_std']:.1f} "
                 f"(n={cell['n_seeds']})")
 
-    source = profiles or "synthetic (fixed-margin prices; seed moves profiles and activation order)"
+    source = profiles or "synthetic (SoC price and battery share; margins 0.25 still fully cross)"
     lines = [
         "# PSD 9.1 kanıt tablosu",
         "",
         f"Kaynak: `{source}`. Süre: {DAYS if not economy else economy[0]['days']} gün, "
-        f"{AGENTS} ajan. Fiyatlandırma sabit marj (SoC'ye duyarlı strateji yok).",
+        f"{AGENTS} ajan. Adım başı SoC fiyatı ve batarya payını belirler; marj 0,25 iken "
+        "her alış her satışı keser. Pay, piyasaya kalan kWh'yi değiştirir.",
         "Sentetik koşuda seed profil gürültüsünü de değiştirir. CSV koşuda enerji serisi "
         "dosyadan gelir; seed yalnız Mesa aktivasyon sırasını değiştirir.",
         "",

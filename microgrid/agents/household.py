@@ -52,6 +52,8 @@ class HouseholdAgent(Agent, ABC):
         self.consumption_profile = consumption_profile
         self.strategy = strategy
         self.battery = battery
+        self.generation_scale = 1.0
+        self.load_scale = 1.0
 
         # Per-step telemetry, read by the model's DataCollector.
         self.generation_kwh = 0.0
@@ -63,6 +65,30 @@ class HouseholdAgent(Agent, ABC):
         self.residual_kwh = 0.0  # after battery, what goes to the market
         self.state = HouseholdState.IDLE
         self.cash_tl = 0.0  # cumulative P2P + grid settlement balance
+
+    @staticmethod
+    def _checked_scale(value: float, name: str) -> float:
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be a non-negative finite number")
+        return float(value)
+
+    @property
+    def generation_scale(self) -> float:
+        """Multiplier on this step's generation. 1 leaves the profile as it is."""
+        return self._generation_scale
+
+    @generation_scale.setter
+    def generation_scale(self, value: float) -> None:
+        self._generation_scale = self._checked_scale(value, "generation_scale")
+
+    @property
+    def load_scale(self) -> float:
+        """Multiplier on this step's consumption. 1 leaves the profile as it is."""
+        return self._load_scale
+
+    @load_scale.setter
+    def load_scale(self, value: float) -> None:
+        self._load_scale = self._checked_scale(value, "load_scale")
 
     @abstractmethod
     def generation(self, step: int) -> float:
@@ -84,26 +110,38 @@ class HouseholdAgent(Agent, ABC):
 
     def step(self) -> None:
         t = self.model.current_step
+        # Each profile is read once. Scales apply to that reading only.
         self.generation_kwh = self.generation(t)
-        self.consumption_kwh = self.consumption_profile.energy_at(t)
+        self.consumption_kwh = self.consumption_profile.energy_at(t) * self.load_scale
         net = self.generation_kwh - self.consumption_kwh
         self.net_kwh = net
 
         # Plan only: the battery state changes in the physical slot.
+        # The target is a share of the net; power and the SoC window clip it.
         self.battery_flow_kwh = 0.0
         if self.battery is not None:
-            if net > 0:
-                intake = self.battery.plan_charge(net)
+            level = self.strategy.fullness(
+                self.soc, self.battery.soc_min, self.battery.soc_max
+            )
+            target = self.strategy.battery_target(net, level)
+            if target > 0:
+                intake = self.battery.plan_charge(target)
                 self.battery_flow_kwh = intake
                 net -= intake
-            elif net < 0:
-                delivered = self.battery.plan_discharge(-net)
+            elif target < 0:
+                delivered = self.battery.plan_discharge(-target)
                 self.battery_flow_kwh = -delivered
                 net += delivered
         self.residual_kwh = net
 
+        # SoC is the start-of-step value: the plan has not been applied yet.
         order = self.strategy.make_order(
-            agent_id=self.unique_id, residual_kwh=net, step=t
+            agent_id=self.unique_id,
+            residual_kwh=net,
+            step=t,
+            soc=None if self.battery is None else self.soc,
+            soc_min=None if self.battery is None else self.battery.soc_min,
+            soc_max=None if self.battery is None else self.battery.soc_max,
         )
         if order is None:
             self.state = HouseholdState.IDLE
@@ -139,7 +177,7 @@ class ProsumerAgent(HouseholdAgent):
         self.solar_profile = solar_profile
 
     def generation(self, step: int) -> float:
-        return self.solar_profile.energy_at(step)
+        return self.solar_profile.energy_at(step) * self.generation_scale
 
 
 class ConsumerAgent(HouseholdAgent):

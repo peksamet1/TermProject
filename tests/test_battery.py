@@ -36,6 +36,17 @@ def test_discharge_respects_power_limit():
     assert delivered == pytest.approx(5.0 * STEP_HOURS)
 
 
+def test_set_soc_stays_inside_the_window():
+    battery = make_battery(initial_soc=0.50, soc_min=0.10, soc_max=0.95)
+    assert battery.set_soc(0.20) == pytest.approx(0.20)
+    assert battery.soc == pytest.approx(0.20)
+    assert battery.energy_kwh == pytest.approx(2.0)
+    assert battery.set_soc(2.0) == pytest.approx(0.95)
+    assert battery.set_soc(-1.0) == pytest.approx(0.10)
+    with pytest.raises(ValueError):
+        battery.set_soc(math.nan)
+
+
 def test_charge_stops_at_soc_max():
     battery = make_battery(initial_soc=0.95)
     assert battery.charge(1.0) == pytest.approx(0.0)

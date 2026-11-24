@@ -97,6 +97,19 @@ class Battery:
     def one_way_efficiency(self) -> float:
         return self._one_way_efficiency
 
+    def set_soc(self, soc: float) -> float:
+        """Store ``soc`` immediately, clipped to the battery window.
+
+        Returns the SoC actually stored. Used by the development panel; the
+        step planner still reads whatever charge is present at the start of
+        the next step.
+        """
+        if not math.isfinite(soc):
+            raise ValueError("soc must be a finite number")
+        clipped = min(self.soc_max, max(self.soc_min, soc))
+        self._energy_kwh = clipped * self.capacity_kwh
+        return clipped
+
     # --- Planning: no side effects -------------------------------------
 
     def plan_charge(self, offered_kwh: float, hours: float | None = None) -> float:

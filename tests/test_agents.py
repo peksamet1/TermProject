@@ -103,43 +103,58 @@ def test_balanced_agent_stays_idle(strategy):
 
 
 def test_battery_charged_before_selling(strategy):
-    """Battery-before-market priority: surplus fills the battery first and
-    only the leftover is offered for sale."""
+    """Half-full battery keeps half the surplus. The 1.25 kWh power cap is above that share."""
     model = empty_model()
-    battery = make_battery()  # intake limit 1.25 kWh/step
+    battery = make_battery()  # s = 0.5, intake limit 1.25 kWh/step
     agent = make_prosumer(
         model, strategy, generation_kwh=2.5, consumption_kwh=0.5, battery=battery
     )
     agent.step()
 
-    assert agent.battery_flow_kwh == pytest.approx(1.25)
-    assert agent.residual_kwh == pytest.approx(0.75)
+    assert agent.battery_flow_kwh == pytest.approx(1.0)
+    assert agent.residual_kwh == pytest.approx(1.0)
     # The agent only plans: SimPy applies the flow in the physical slot.
     assert battery.soc == pytest.approx(0.5)
     order = model.market.orders[0]
     assert order.side is OrderSide.SELL
-    assert order.quantity_kwh == pytest.approx(0.75)
+    assert order.quantity_kwh == pytest.approx(1.0)
 
 
 def test_battery_discharged_before_buying(strategy):
+    """Half-full battery covers half a 2 kWh deficit; the rest is bought."""
     model = empty_model()
-    battery = make_battery()  # delivery limit 1.25 kWh/step
+    battery = make_battery()  # s = 0.5, delivery limit 1.25 kWh/step
     agent = make_prosumer(
         model, strategy, generation_kwh=0.0, consumption_kwh=2.0, battery=battery
     )
     agent.step()
 
-    assert agent.battery_flow_kwh == pytest.approx(-1.25)
+    assert agent.battery_flow_kwh == pytest.approx(-1.0)
+    assert agent.residual_kwh == pytest.approx(-1.0)
     assert battery.soc == pytest.approx(0.5)  # planned, not applied yet
     order = model.market.orders[0]
     assert order.side is OrderSide.BUY
-    assert order.quantity_kwh == pytest.approx(0.75)
+    assert order.quantity_kwh == pytest.approx(1.0)
+
+
+def test_half_full_battery_shares_a_small_deficit(strategy):
+    """A 1 kWh deficit at s = 0.5 is split: 0.5 from the battery, 0.5 from the market."""
+    model = empty_model()
+    battery = make_battery()
+    agent = make_prosumer(
+        model, strategy, generation_kwh=0.0, consumption_kwh=1.0, battery=battery
+    )
+    agent.step()
+
+    assert agent.battery_flow_kwh == pytest.approx(-0.5)
+    assert agent.state is HouseholdState.BUYING
+    assert model.market.orders[0].quantity_kwh == pytest.approx(0.5)
 
 
 def test_full_battery_deficit_covered_no_order(strategy):
-    """If the battery can fully cover the deficit, the agent stays idle."""
+    """A full battery covers a deficit that fits under the power limit, so the agent stays idle."""
     model = empty_model()
-    battery = make_battery()
+    battery = make_battery(initial_soc=1.0)
     agent = make_prosumer(
         model, strategy, generation_kwh=0.0, consumption_kwh=1.0, battery=battery
     )
@@ -148,6 +163,39 @@ def test_full_battery_deficit_covered_no_order(strategy):
     assert agent.state is HouseholdState.IDLE
     assert model.market.orders == []
     assert agent.battery_flow_kwh == pytest.approx(-1.0)
+
+
+def test_empty_battery_charges_the_surplus_up_to_the_power_cap(strategy):
+    """s = 0 asks for the whole surplus; the 1.25 kWh power cap still clips it."""
+    model = empty_model()
+    battery = make_battery(initial_soc=0.0)
+    agent = make_prosumer(
+        model, strategy, generation_kwh=2.5, consumption_kwh=0.5, battery=battery
+    )
+    agent.step()
+
+    assert agent.battery_flow_kwh == pytest.approx(1.25)
+    assert model.market.orders[0].side is OrderSide.SELL
+    assert model.market.orders[0].quantity_kwh == pytest.approx(0.75)
+
+
+def test_full_battery_sells_the_whole_surplus(strategy):
+    """s = 1 asks for no charge, so the surplus is sold."""
+    model = empty_model()
+    battery = make_battery(initial_soc=1.0)
+    agent = make_prosumer(
+        model, strategy, generation_kwh=2.5, consumption_kwh=0.5, battery=battery
+    )
+    agent.step()
+
+    assert agent.battery_flow_kwh == pytest.approx(0.0)
+    assert model.market.orders[0].side is OrderSide.SELL
+    assert model.market.orders[0].quantity_kwh == pytest.approx(2.0)
+
+
+def test_missing_fullness_offers_the_whole_net(strategy):
+    assert strategy.battery_target(2.0, None) == pytest.approx(2.0)
+    assert strategy.battery_target(-1.5, None) == pytest.approx(-1.5)
 
 
 def test_consumer_has_no_generation_and_nan_soc(strategy):
@@ -167,6 +215,112 @@ def test_order_prices_stay_inside_tariff_band(strategy):
     assert tariff.feed_in_tl_per_kwh < buy.price_tl_per_kwh < tariff.retail_tl_per_kwh
     # A rational market needs bid > ask headroom inside the band
     assert buy.price_tl_per_kwh > sell.price_tl_per_kwh
+
+
+def test_soc_moves_the_price_and_stays_inside_the_band(strategy):
+    tariff = strategy.tariff
+    band = tariff.retail_tl_per_kwh - tariff.feed_in_tl_per_kwh
+    empty = dict(soc=0.10, soc_min=0.10, soc_max=0.95)
+    full = dict(soc=0.95, soc_min=0.10, soc_max=0.95)
+    empty_ask = strategy.make_order(agent_id=1, residual_kwh=1.0, step=0, **empty)
+    full_ask = strategy.make_order(agent_id=1, residual_kwh=1.0, step=0, **full)
+    empty_bid = strategy.make_order(agent_id=1, residual_kwh=-1.0, step=0, **empty)
+    full_bid = strategy.make_order(agent_id=1, residual_kwh=-1.0, step=0, **full)
+    assert empty_ask.price_tl_per_kwh == pytest.approx(
+        tariff.feed_in_tl_per_kwh + strategy.sell_margin * band
+    )
+    assert full_ask.price_tl_per_kwh == pytest.approx(tariff.feed_in_tl_per_kwh)
+    assert empty_bid.price_tl_per_kwh == pytest.approx(tariff.retail_tl_per_kwh)
+    assert full_bid.price_tl_per_kwh == pytest.approx(
+        tariff.retail_tl_per_kwh - strategy.buy_margin * band
+    )
+    assert full_ask.price_tl_per_kwh < empty_ask.price_tl_per_kwh
+    assert empty_bid.price_tl_per_kwh > full_bid.price_tl_per_kwh
+    # Default margins still leave every bid above every ask.
+    assert empty_bid.price_tl_per_kwh > empty_ask.price_tl_per_kwh
+    assert full_bid.price_tl_per_kwh > full_ask.price_tl_per_kwh
+
+
+def test_prosumer_order_uses_its_start_of_step_soc(strategy):
+    model = empty_model()
+    low = make_prosumer(
+        model, strategy, generation_kwh=3.0, consumption_kwh=0.0,
+        battery=make_battery(initial_soc=0.10, soc_min=0.10, soc_max=0.95),
+    )
+    high = make_prosumer(
+        model, strategy, generation_kwh=3.0, consumption_kwh=0.0,
+        battery=make_battery(initial_soc=0.95, soc_min=0.10, soc_max=0.95),
+    )
+    low.step()
+    high.step()
+    assert model.market.orders[0].price_tl_per_kwh > model.market.orders[1].price_tl_per_kwh
+
+
+def test_nan_soc_keeps_the_fixed_margin(strategy):
+    fixed = strategy.make_order(agent_id=1, residual_kwh=1.0, step=0)
+    nan_soc = strategy.make_order(
+        agent_id=1, residual_kwh=1.0, step=0, soc=math.nan, soc_min=0.1, soc_max=0.95
+    )
+    assert nan_soc.price_tl_per_kwh == pytest.approx(fixed.price_tl_per_kwh)
+
+
+class CountingProfile(ConstantProfile):
+    def __init__(self, kwh: float) -> None:
+        super().__init__(kwh)
+        self.reads = 0
+
+    def energy_at(self, step: int) -> float:
+        self.reads += 1
+        return super().energy_at(step)
+
+
+def test_generation_scale_doubles_and_reads_the_profile_once(strategy):
+    model = empty_model()
+    solar = CountingProfile(1.5)
+    load = CountingProfile(0.5)
+    agent = ProsumerAgent(
+        model,
+        solar_profile=solar,
+        consumption_profile=load,
+        strategy=strategy,
+        battery=make_battery(),
+    )
+    agent.generation_scale = 2
+    agent.step()
+
+    assert solar.reads == 1
+    assert load.reads == 1
+    assert agent.generation_kwh == pytest.approx(3.0)
+    assert agent.consumption_kwh == pytest.approx(0.5)
+
+
+def test_load_scale_doubles_and_reads_the_profile_once(strategy):
+    model = empty_model()
+    solar = CountingProfile(1.0)
+    load = CountingProfile(0.5)
+    agent = ProsumerAgent(
+        model,
+        solar_profile=solar,
+        consumption_profile=load,
+        strategy=strategy,
+        battery=make_battery(),
+    )
+    agent.load_scale = 2
+    agent.step()
+
+    assert solar.reads == 1
+    assert load.reads == 1
+    assert agent.generation_kwh == pytest.approx(1.0)
+    assert agent.consumption_kwh == pytest.approx(1.0)
+
+
+def test_negative_scale_is_rejected(strategy):
+    model = empty_model()
+    agent = make_prosumer(model, strategy, generation_kwh=1.0, consumption_kwh=0.5)
+    with pytest.raises(ValueError):
+        agent.generation_scale = -1
+    with pytest.raises(ValueError):
+        agent.load_scale = math.nan
 
 
 def test_tiny_residual_produces_no_order(strategy):
