@@ -6,6 +6,10 @@ local trade against the no-P2P baseline, a winter day with less sun, and that
 a household scale or a SoC edit changes the next step of that household only.
 """
 
+import threading
+import time
+
+import pandas as pd
 import pytest
 
 from microgrid.agents.household import ProsumerAgent
@@ -154,3 +158,84 @@ def test_half_full_battery_keeps_only_its_share_of_a_surplus():
     assert home.battery_flow_kwh == pytest.approx(min(share, 1.25))
     assert home.battery_flow_kwh < home.generation_kwh
     assert home.residual_kwh == pytest.approx(home.generation_kwh - home.battery_flow_kwh)
+
+
+def test_generation_scale_leaves_a_readable_history():
+    model = MicrogridModel(seed=42, start_day_of_year=172)
+    model.run(5)
+    _prosumer(model).generation_scale = 2.0
+    frame = pd.DataFrame(model.copy_model_vars())
+    records, _names = model.copy_agent_records()
+    assert len(frame) == 5
+    assert len(records) == 5 * len(list(model.agents))
+    assert len(set(map(len, model.copy_model_vars().values()))) == 1
+
+
+def test_history_copy_waits_for_the_step_being_recorded():
+    """Play writes history on a thread. A chart read must not see a half row."""
+    model = MicrogridModel(seed=42, start_day_of_year=172)
+    model.step()
+    column = next(iter(model.datacollector.model_vars))
+    entered = threading.Event()
+
+    class _SlowList(list):
+        def append(self, item):
+            super().append(item)
+            entered.set()
+            time.sleep(0.2)
+
+    model.datacollector.model_vars[column] = _SlowList(model.datacollector.model_vars[column])
+    worker = threading.Thread(target=model.step)
+    worker.start()
+    assert entered.wait(2)
+    snapshot = model.copy_model_vars()
+    worker.join(2)
+    assert not worker.is_alive()
+    lengths = {len(values) for values in snapshot.values()}
+    assert lengths == {2}
+
+
+def test_a_recorded_step_keeps_its_own_clock_and_households():
+    """Day 180 at 13:00 is one stored step, not the live end of the run."""
+    from app import _rows_at, moment_text
+
+    assert moment_text(0, 96, 172) == "Day 1 · 00:00 · day of year 172 · step 0"
+    assert moment_text(52, 96, 172) == "Day 1 · 13:00 · day of year 172 · step 52"
+    assert moment_text(96, 96, 172) == "Day 2 · 00:00 · day of year 173 · step 96"
+    last = 180 * 96 - 1
+    assert moment_text(last, 96, 172) == "Day 180 · 23:45 · day of year 351 · step 17279"
+
+    model = MicrogridModel(seed=42, start_day_of_year=172, num_prosumers=1, num_consumers=0)
+    model.run(54)
+    agent_df = model.datacollector.get_agent_vars_dataframe()
+    noon = _rows_at(agent_df, NOON_STEP)
+    end = _rows_at(agent_df, 53)
+    home = _prosumer(model)
+
+    assert noon is not None and end is not None
+    assert float(noon["Generation"].iloc[0]) > 0
+    assert list(end["Label"]) == [home.label]
+    assert float(end["SoC"].iloc[0]) == pytest.approx(home.soc)
+    assert float(end["CashTL"].iloc[0]) == pytest.approx(home.cash_tl)
+
+
+def test_report_slice_matches_the_full_run_and_keeps_noon_cash():
+    """The panel's prefix uses the same KPI functions as the finished run."""
+    from app import report_kpis, slice_history
+
+    model = MicrogridModel(seed=42, start_day_of_year=172)
+    model.run(54)
+    kpis = run_kpis(model)
+    model_df = model.datacollector.get_model_vars_dataframe()
+    agent_df = model.datacollector.get_agent_vars_dataframe()
+    full_model, full_agent = slice_history(model_df, agent_df, 53)
+    got = report_kpis(full_model, full_agent)
+    noon_model, noon_agent = slice_history(model_df, agent_df, NOON_STEP)
+    noon = report_kpis(noon_model, noon_agent)
+
+    assert got["demand_fill_rate"] == pytest.approx(kpis["demand_fill_rate"])
+    assert got["trade_success_rate"] == pytest.approx(kpis["trade_success_rate"])
+    assert got["community_cost_tl"] == pytest.approx(kpis["community_cost_tl"])
+    assert got["violations"] == pytest.approx(kpis["violations"])
+    assert got["balance_error_kwh"] == pytest.approx(kpis["balance_error_kwh"])
+    assert noon["community_cost_tl"] != pytest.approx(got["community_cost_tl"])

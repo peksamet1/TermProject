@@ -10,6 +10,7 @@ Notes:
 from __future__ import annotations
 
 import math
+import threading
 
 from mesa import DataCollector, Model
 
@@ -117,6 +118,11 @@ class MicrogridModel(Model):
         self.avg_trade_price = math.nan
         self.buy_orders = 0
         self.sell_orders = 0
+
+        # The panel reads history while Play steps on another thread.
+        # collect() and those copies share this lock so a chart never sees
+        # a row that was only half written.
+        self._history_lock = threading.Lock()
 
         self.datacollector = DataCollector(
             model_reporters={
@@ -323,7 +329,24 @@ class MicrogridModel(Model):
 
     def _collect(self) -> None:
         """Stage 4/4: record this step's data."""
-        self.datacollector.collect(self)
+        with self._history_lock:
+            self.datacollector.collect(self)
+
+    def copy_model_vars(self) -> dict[str, list]:
+        """A consistent copy of the community history. Safe while Play is stepping."""
+        with self._history_lock:
+            return {name: list(values) for name, values in self.datacollector.model_vars.items()}
+
+    def copy_agent_records(self) -> tuple[list[tuple], list[str]]:
+        """Agent rows and reporter names from the same completed steps."""
+        with self._history_lock:
+            records = [
+                row
+                for rows in self.datacollector._agent_records.values()
+                for row in rows
+            ]
+            names = list(self.datacollector.agent_reporters)
+        return records, names
 
     def close(self) -> None:
         """Release market resources (the ZeroMQ sockets of cda_zmq)."""
